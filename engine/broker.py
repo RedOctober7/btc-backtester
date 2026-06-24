@@ -7,7 +7,7 @@ never selects a price itself — separating concerns makes timing bugs visible.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import pandas as pd

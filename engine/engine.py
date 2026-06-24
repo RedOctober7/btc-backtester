@@ -107,7 +107,7 @@ def run_backtest(
                     float(bar["close"]), timestamp, reason="end_of_data", bar_idx=t
                 )
 
-        # ── Step 4: Mark equity to market at bar t's CLOSE ────────────────────
+        # ── Step 5: Mark equity to market at bar t's CLOSE ────────────────────
         broker.mark_to_market(timestamp, float(bar["close"]))
 
     return BacktestResult(

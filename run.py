@@ -8,7 +8,6 @@ Usage examples (one flag per line — PowerShell 5.1 doesn't support && chaining
 """
 import argparse
 import logging
-from datetime import datetime, timezone
 
 from data.loader import load_candles
 from engine.engine import run_backtest

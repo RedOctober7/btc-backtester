@@ -44,6 +44,9 @@ class MACrossover(Strategy):
         """
         self.sma_fast = data["close"].rolling(self.fast_period).mean()
         self.sma_slow = data["close"].rolling(self.slow_period).mean()
+        # Reset mutable state so the same instance can be passed to run_backtest() twice
+        # without carrying forward the peak from the previous run.
+        self._peak_close = 0.0
 
     def on_bar(self, context) -> None:
         i = context.current_idx

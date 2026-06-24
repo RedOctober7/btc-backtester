@@ -55,12 +55,9 @@ def test_cagr_hand_computed():
 def test_annualized_volatility_hand_computed():
     """
     Volatility = std(per-bar returns) × sqrt(2190) × 100.
-    Build a 2-bar equity to control the return exactly.
+    3 bars so pct_change().dropna() has 2 values and std() is defined.
     """
-    # 2 bars: 1000 → 1010, return = 0.01 (1%)
-    equity = _make_equity([1000.0, 1010.0])
-    # pct_change() gives [NaN, 0.01]; dropna() gives [0.01]; std of single value = NaN
-    # Use 3 bars: [1000, 1010, 990] → returns [0.01, -0.0198...]
+    # [1000, 1010, 990] → returns [+1%, -1.98%]; std is well-defined
     equity = _make_equity([1000.0, 1010.0, 990.0])
     ret = equity.pct_change().dropna()
     expected = float(ret.std() * math.sqrt(BARS_PER_YEAR) * 100.0)

@@ -100,3 +100,15 @@ Then pass it to `run_backtest()`.
 - No walk-forward analysis or parameter optimization.
 - No intrabar stop (stop evaluates at close, exits at next open -- see `ma_crossover.py`).
 - No web UI, no live trading.
+
+### Strategy regime-dependence
+
+The bundled SMA crossover is a trend-following strategy. It performs well in sustained
+directional moves (strong bull or bear trends) because it catches the move early and
+rides it. It struggles in sideways, choppy, or mean-reverting markets: price oscillates
+around the moving averages without committing to a direction, producing rapid crossover
+signals that enter and exit at nearly identical prices while each side pays fees. This
+pattern of small repeated losses is called "whipsaw." The 8% drawdown stop limits
+individual loss size but does not prevent whipsaw — it only caps how far a single bad
+position can run. If you see a backtest period with many short trades (< 50 bars) and
+near-zero or negative returns, that is likely a sideways regime, not a strategy bug.

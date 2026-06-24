@@ -6,7 +6,6 @@ Engine loop correctness tests:
 - in_position series tracks position state at bar-start
 """
 import pandas as pd
-import pytest
 from conftest import make_ohlcv
 from engine.engine import run_backtest
 from strategies.base import Strategy

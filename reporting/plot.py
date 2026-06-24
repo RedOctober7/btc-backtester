@@ -34,7 +34,7 @@ def plot_results(
     ax1.plot(equity.index, equity.values, color="steelblue", linewidth=1.5, label="Equity")
 
     # Mark entries (green up-triangle) and exits (red down-triangle)
-    entry_times = [t.entry_time for t in trades if t.entry_time in equity.index or True]
+    entry_times = [t.entry_time for t in trades]
     entry_equities = [float(equity.asof(t.entry_time)) for t in trades]
     if entry_times:
         ax1.scatter(
