@@ -42,9 +42,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    print(f"\nLoading {args.symbol} 4h candles ({args.start} → {args.end or 'today'})...")
+    print(f"\nLoading {args.symbol} 4h candles ({args.start} to {args.end or 'today'})...")
     data = load_candles(args.symbol, "4h", args.start, args.end)
-    print(f"Loaded {len(data):,} candles  ({data.index[0].date()} → {data.index[-1].date()})")
+    print(f"Loaded {len(data):,} candles  ({data.index[0].date()} to {data.index[-1].date()})")
 
     strategy = MACrossover(
         fast_period=args.fast,

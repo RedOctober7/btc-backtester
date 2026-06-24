@@ -149,7 +149,7 @@ def compute_all_metrics(result) -> dict:
 _DESCRIPTIONS = {
     "Total Return (%)":         "overall gain/loss over the full period",
     "CAGR (%)":                 "annualized compounded return",
-    "Annualized Volatility (%)":"std dev of per-bar returns × sqrt(2190), as %",
+    "Annualized Volatility (%)":"std dev of per-bar returns * sqrt(2190), as %",
     "Sharpe Ratio":             "risk-adjusted return; full-series, annualized, rf=0",
     "Max Drawdown (%)":         "worst peak-to-trough equity decline",
     "Max Drawdown Duration":    "time from peak to trough (not to recovery)",
