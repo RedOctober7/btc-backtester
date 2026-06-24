@@ -4,7 +4,6 @@ Every test here works out the expected value by hand, then asserts the function
 matches. This catches annualization errors and formula bugs early.
 """
 import math
-import numpy as np
 import pandas as pd
 import pytest
 from metrics.metrics import (
@@ -40,6 +39,37 @@ def test_total_return_negative():
     assert abs(total_return(equity) - (-50.0)) < 1e-8
 
 
+def test_cagr_hand_computed():
+    """
+    equity doubles in exactly 2190 bars (1 year at 6 bars/day × 365).
+    CAGR of doubling in 1 year = 100%.
+    """
+    # 2190 bars = exactly 1 year of 4h bars
+    values = [1000.0] + [1000.0] * 2188 + [2000.0]  # flat then spike at final bar
+    equity = _make_equity(values)
+    result = cagr(equity)
+    # 1 year elapsed, final/initial = 2.0 → CAGR = (2.0^(1/1) - 1) * 100 = 100%
+    assert abs(result - 100.0) < 1e-6, f"Expected 100.0%, got {result}"
+
+
+def test_annualized_volatility_hand_computed():
+    """
+    Volatility = std(per-bar returns) × sqrt(2190) × 100.
+    Build a 2-bar equity to control the return exactly.
+    """
+    # 2 bars: 1000 → 1010, return = 0.01 (1%)
+    equity = _make_equity([1000.0, 1010.0])
+    # pct_change() gives [NaN, 0.01]; dropna() gives [0.01]; std of single value = NaN
+    # Use 3 bars: [1000, 1010, 990] → returns [0.01, -0.0198...]
+    equity = _make_equity([1000.0, 1010.0, 990.0])
+    ret = equity.pct_change().dropna()
+    expected = float(ret.std() * math.sqrt(BARS_PER_YEAR) * 100.0)
+    result = annualized_volatility(equity)
+    assert abs(result - expected) < 1e-8, f"Expected {expected}, got {result}"
+    # Sanity: result must be positive
+    assert result > 0.0
+
+
 # ---------------------------------------------------------------------------
 # Max drawdown
 # ---------------------------------------------------------------------------
@@ -55,6 +85,10 @@ def test_max_drawdown_hand_computed():
     dd, duration = max_drawdown(equity)
     expected = -300.0 / 1100.0 * 100
     assert abs(dd - expected) < 1e-6, f"Expected {expected:.6f}%, got {dd:.6f}%"
+    # Duration: peak at bar 1 (1100), trough at bar 3 (800) → 2 × 4h intervals
+    assert duration is not None, "Expected a non-None duration for a real drawdown"
+    # With 4h bars, 2-bar distance = 8 hours
+    assert duration == pd.Timedelta(hours=8), f"Expected 8h duration, got {duration}"
 
 
 def test_max_drawdown_no_drawdown():
