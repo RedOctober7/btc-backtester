@@ -1,5 +1,4 @@
 import pandas as pd
-import pytest
 
 
 def make_ohlcv(rows: list[tuple[float, float, float, float]], freq: str = "4h") -> pd.DataFrame:

@@ -100,7 +100,7 @@ def _discard_unfinished_candles(df: pd.DataFrame) -> pd.DataFrame:
     mask = df["close_time"] <= now_utc
     n_dropped = int((~mask).sum())
     if n_dropped:
-        logger.info("Dropped %d unfinished candle(s) (close_time in the future)", n_dropped)
+        logger.debug("Dropped %d unfinished candle(s) (close_time in the future)", n_dropped)
     return df[mask]
 
 
@@ -111,7 +111,7 @@ def _fetch_page(
     interval: str,
     start_ms: int,
     end_ms: int,
-) -> list:
+) -> list[list]:
     params = {
         "symbol": symbol,
         "interval": interval,
@@ -221,7 +221,7 @@ def load_candles(
         return df
 
     start_ms = int(pd.Timestamp(start_date, tz="UTC").timestamp() * 1000)
-    end_ms = int(pd.Timestamp(end_date, tz="UTC").timestamp() * 1000)
+    end_ms = int((pd.Timestamp(end_date, tz="UTC") + pd.Timedelta(days=1)).timestamp() * 1000)
 
     logger.info("Fetching %s %s candles from Binance (%s -> %s)...", symbol, interval, start_date, end_date)
     raw = _fetch_all_klines(symbol, interval, start_ms, end_ms)
