@@ -69,7 +69,7 @@ def main() -> None:
     print_trade_blotter(result.trades)
 
     if not args.no_plot:
-        plot_results(result.equity, result.trades, save_path=args.save_plot)
+        plot_results(result.equity, result.data, result.trades, save_path=args.save_plot)
 
 
 if __name__ == "__main__":
