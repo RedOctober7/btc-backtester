@@ -163,16 +163,19 @@ def plot_results(
         tight_layout=True,
     )
 
-    # Manual drawdown fill — more reliable than fill_between kwarg in make_addplot
-    # axes[2] is the drawdown panel (panels: 0=price, 1=equity, 2=drawdown)
+    # Manual drawdown fill using x-coords from the line mplfinance already drew,
+    # which guarantees alignment with the internal axis regardless of how mplfinance
+    # maps timestamps to float positions internally.
     dd_ax = axes[2]
-    dd_ax.fill_between(
-        range(len(drawdown)),
-        drawdown.values,
-        0,
-        color="#ef5350",
-        alpha=0.25,
-    )
+    dd_lines = dd_ax.get_lines()
+    if dd_lines:
+        dd_ax.fill_between(
+            dd_lines[0].get_xdata(),
+            dd_lines[0].get_ydata(),
+            0,
+            color="#ef5350",
+            alpha=0.25,
+        )
 
     fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="#131722")
     print(f"Chart saved to: {save_path}  [{n_bars:,} bars, {mode_label} mode]")
