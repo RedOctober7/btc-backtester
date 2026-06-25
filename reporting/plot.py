@@ -163,15 +163,23 @@ def plot_results(
         tight_layout=True,
     )
 
-    # Manual drawdown fill using x-coords from the line mplfinance already drew.
-    # axes[-1] = drawdown panel: mplfinance inserts a hidden volume axis at index 1
-    # even when volume=False, so numeric indices are unreliable — use -1 (last panel).
-    dd_ax = axes[-1]
-    dd_lines = dd_ax.get_lines()
-    if dd_lines:
+    # Find the drawdown axis by y-value sign: drawdown is always <= 0, while the
+    # price and equity axes have large positive values. Numeric indexing is fragile
+    # because candle mode adds scatter twinx axes that extend the axes list unpredictably.
+    dd_ax = None
+    for ax in axes:
+        lines = ax.get_lines()
+        if not lines:
+            continue
+        valid = lines[0].get_ydata()
+        valid = valid[~np.isnan(valid)]
+        if len(valid) > 0 and valid.max() <= 0.001:
+            dd_ax = ax
+            break
+    if dd_ax is not None:
         dd_ax.fill_between(
-            dd_lines[0].get_xdata(),
-            dd_lines[0].get_ydata(),
+            dd_ax.get_lines()[0].get_xdata(),
+            dd_ax.get_lines()[0].get_ydata(),
             0,
             color="#ef5350",
             alpha=0.25,
