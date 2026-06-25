@@ -83,6 +83,49 @@ class MyStrategy(Strategy):
 
 Then pass it to `run_backtest()`.
 
+## Sample results — SMA(50,200), 8% stop, 10k USDT
+
+> **Representative run: 2022-01-01 to 2026-06-25 (4.5 years, 31 trades)**
+
+| Metric | Value |
+|---|---|
+| Total Return | +61.42% |
+| CAGR | 11.27% |
+| Annualized Volatility | 25.03% |
+| Sharpe Ratio | 0.55 |
+| Max Drawdown | -41.75% |
+| Max Drawdown Duration | 734 days |
+| Win Rate | 38.71% |
+| Avg Win / Avg Loss | +$1,784 / -$803 |
+| Profit Factor | 1.40 |
+| Exposure | 35.1% |
+
+![Backtest chart](backtest_results_full.png)
+
+### Why earlier runs showed stronger numbers
+
+A 2022-01-01 to 2024-06-01 subset of the same strategy produced +111% total return,
+Sharpe 1.24, and max drawdown -20.7% — substantially better on every metric. That
+window is not representative, and should not be quoted as "the" performance number.
+
+What happened: the strategy caught the 2023-2024 BTC bull run almost perfectly. It sat
+out most of the 2022 bear market (flat from ~$47k down to ~$16k), then re-entered in
+January 2023 and rode two large trending moves — a +25% trade in Jan-Feb 2023 and a
++59% trade from September 2023 to January 2024 (+$5,979), followed immediately by a
++42% trade in the February-March 2024 rally (+$6,734). Those two trades alone account
+for the bulk of the shorter window's gains.
+
+The 2024-2026 period reversed much of this. After BTC's post-ATH oscillation began,
+the strategy accumulated 14 additional trades with a negative net: repeated stop-outs
+in the $60k-$110k range as price moved in both directions without sustaining a trend.
+This is the whipsaw regime described in the limitations section. Equity peaked near
+$24k in early 2024 and ground back to ~$16k by mid-2026.
+
+The full 4.5-year run is harder to look at but more honest: it includes both the regime
+the strategy is built for (trending) and the one it handles poorly (choppy). A Sharpe
+of 0.55 and profit factor of 1.40 over that full period mean the strategy is still
+positive-expectancy, but not a free lunch.
+
 ## Correctness guarantees
 
 1. **No lookahead**: `Context._data = data.iloc[:t+1]` -- future rows are absent, not just hidden.
