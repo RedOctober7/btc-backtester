@@ -163,10 +163,10 @@ def plot_results(
         tight_layout=True,
     )
 
-    # Manual drawdown fill using x-coords from the line mplfinance already drew,
-    # which guarantees alignment with the internal axis regardless of how mplfinance
-    # maps timestamps to float positions internally.
-    dd_ax = axes[2]
+    # Manual drawdown fill using x-coords from the line mplfinance already drew.
+    # axes[-1] = drawdown panel: mplfinance inserts a hidden volume axis at index 1
+    # even when volume=False, so numeric indices are unreliable — use -1 (last panel).
+    dd_ax = axes[-1]
     dd_lines = dd_ax.get_lines()
     if dd_lines:
         dd_ax.fill_between(
