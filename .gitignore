@@ -6,4 +6,8 @@ __pycache__/
 dist/
 build/
 .pytest_cache/
-cache/*.parquet
+cache/
+
+# Backtest output artifacts
+backtest_results.png
+test_output.txt
