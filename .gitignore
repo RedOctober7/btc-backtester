@@ -10,4 +10,5 @@ cache/
 
 # Backtest output artifacts
 backtest_results.png
+backtest_2018_choppy.png
 test_output.txt
