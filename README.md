@@ -100,6 +100,8 @@ Then pass it to `run_backtest()`.
 | Profit Factor | 1.40 |
 | Exposure | 35.1% |
 
+The chart uses a TradingView-style dark theme with three panels: BTC 4h price (top — candlesticks for ranges up to 90 days, a price line for longer ranges), equity curve in USDT (middle), and underwater drawdown as a percentage (bottom, red fill). Short-range runs show entry/exit triangle markers at actual fill prices; multi-year runs switch to line mode to avoid overplotting.
+
 ![Backtest chart](backtest_results_full.png)
 
 ### Why earlier runs showed stronger numbers
