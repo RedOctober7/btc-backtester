@@ -126,6 +126,23 @@ the strategy is built for (trending) and the one it handles poorly (choppy). A S
 of 0.55 and profit factor of 1.40 over that full period mean the strategy is still
 positive-expectancy, but not a free lunch.
 
+### Strategy performance across regimes
+
+Same strategy, identical parameters, three different market conditions:
+
+| Period | Regime | Total Return | Sharpe | Max Drawdown | Profit Factor | Trades |
+|---|---|---|---|---|---|---|
+| 2022-01-01 to 2024-06-01 | Trending | +111.0% | 1.24 | -20.7% | 3.11 | 17 |
+| 2022-01-01 to 2026-06-25 | Mixed | +61.4% | 0.55 | -41.75% | 1.40 | 31 |
+| 2018-08-01 to 2019-04-01 | Choppy/sideways | -4.87% | -0.23 | -11.47% | 0.42 | 4 |
+
+The only variable across these three runs is the market regime — parameters, fees, and
+logic are identical. A profit factor range of 0.42 to 3.11 on the same rules illustrates
+the core lesson of trend-following: regime awareness matters more than parameter tuning,
+because no parameter set makes a crossover strategy profitable in a directionless market.
+This is precisely why walk-forward testing and regime detection exist — and why they are
+correctly out of scope for this v1.
+
 ## Correctness guarantees
 
 1. **No lookahead**: `Context._data = data.iloc[:t+1]` -- future rows are absent, not just hidden.
