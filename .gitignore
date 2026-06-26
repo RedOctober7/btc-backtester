@@ -12,7 +12,8 @@ cache/
 backtest_results.png
 test_output.txt
 
-# Timestamped chart copies (YYYY-MM-DD_HHMMSS suffix) — only stable names are tracked
+# Timestamped backtest charts (backtest_YYYY-MM-DD_HHMMSS.png).
+# Only backtest_results_full.png is tracked; everything else stays local.
 *_????-??-??_??????.png
 
 # Diagnostic / one-off test charts

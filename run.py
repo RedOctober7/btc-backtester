@@ -5,9 +5,11 @@ Usage examples (one flag per line — PowerShell 5.1 doesn't support && chaining
     python run.py
     python run.py --start 2021-01-01 --end 2024-01-01 --fast 20 --slow 100
     python run.py --no-plot
+    python run.py --update-readme-chart
 """
 import argparse
 import logging
+import shutil
 
 from data.loader import load_candles
 from engine.engine import run_backtest
@@ -33,8 +35,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--slow",      type=int,   default=200,       help="Slow SMA period")
     parser.add_argument("--stop",      type=float, default=0.08,      help="Drawdown stop threshold (0.08 = 8%%)")
     parser.add_argument("--fraction",  type=float, default=1.0,       help="Position size as fraction of equity")
-    parser.add_argument("--no-plot",   action="store_true",           help="Skip chart generation")
-    parser.add_argument("--save-plot", default="backtest_results.png", help="Chart output path")
+    parser.add_argument("--no-plot",            action="store_true", help="Skip chart generation")
+    parser.add_argument("--update-readme-chart", action="store_true",
+                        help="Copy generated chart to backtest_results_full.png (the tracked README image)")
     return parser.parse_args()
 
 
@@ -68,8 +71,12 @@ def main() -> None:
     print("\nTrade Blotter:")
     print_trade_blotter(result.trades)
 
-    if not args.no_plot:
-        plot_results(result.equity, result.data, result.trades, save_path=args.save_plot)
+    if not args.no_plot or args.update_readme_chart:
+        ts_path = plot_results(result.equity, result.data, result.trades)
+        if args.update_readme_chart:
+            stable = "backtest_results_full.png"
+            shutil.copy2(ts_path, stable)
+            print(f"README chart updated: {stable}  (copied from {ts_path})")
 
 
 if __name__ == "__main__":
