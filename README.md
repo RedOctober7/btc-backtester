@@ -46,6 +46,12 @@ python run.py
 
 # Custom range and parameters
 python run.py --start 2021-01-01 --end 2024-01-01 --fast 20 --slow 100 --stop 0.05
+
+# Skip chart generation
+python run.py --no-plot
+
+# Update the README's canonical chart (backtest_results_full.png)
+python run.py --update-readme-chart
 ```
 
 ## Run tests
