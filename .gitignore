@@ -11,3 +11,10 @@ cache/
 # Backtest output artifacts
 backtest_results.png
 test_output.txt
+
+# Diagnostic / one-off test charts
+backtest_60d.png
+backtest_60day_check.png
+backtest_89d.png
+backtest_91d.png
+debug_fill.png
