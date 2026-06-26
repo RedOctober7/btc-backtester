@@ -18,6 +18,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import mplfinance as mpf
+from datetime import datetime
+from pathlib import Path
 
 from engine.broker import Trade
 
@@ -79,7 +81,7 @@ def plot_results(
     trades: list[Trade],
     save_path: str = "backtest_results.png",
     show: bool = True,
-) -> None:
+) -> str:
     """
     Save (and optionally display) a three-panel TradingView-style dark chart.
 
@@ -185,9 +187,17 @@ def plot_results(
             alpha=0.25,
         )
 
+    p = Path(save_path)
+    ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    ts_path = str(p.with_name(f"{p.stem}_{ts}{p.suffix}"))
+
     fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="#131722")
-    print(f"Chart saved to: {save_path}  [{n_bars:,} bars, {mode_label} mode]")
+    fig.savefig(ts_path,   dpi=150, bbox_inches="tight", facecolor="#131722")
+
+    print(f"Chart saved to: {save_path}  [{n_bars:,} bars, {mode_label} mode]  (stable, for README)")
+    print(f"Chart saved to: {ts_path}  (timestamped - open this one to avoid stale-cache issues)")
 
     if show:
         plt.show()
     plt.close(fig)
+    return ts_path
