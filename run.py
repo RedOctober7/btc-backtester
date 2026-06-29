@@ -36,6 +36,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stop",      type=float, default=0.08,      help="Drawdown stop threshold (0.08 = 8%%)")
     parser.add_argument("--fraction",  type=float, default=1.0,       help="Position size as fraction of equity")
     parser.add_argument("--no-plot",            action="store_true", help="Skip chart generation")
+    parser.add_argument("--show-levels",        action="store_true",
+                        help="Overlay swing points, Fibonacci levels, and trendlines on the "
+                             "price panel (visualization only — see analysis/levels.py)")
     parser.add_argument("--update-readme-chart", action="store_true",
                         help="Copy generated chart to backtest_results_full.png (the tracked README image)")
     return parser.parse_args()
@@ -72,7 +75,10 @@ def main() -> None:
     print_trade_blotter(result.trades)
 
     if not args.no_plot or args.update_readme_chart:
-        ts_path = plot_results(result.equity, result.data, result.trades)
+        ts_path = plot_results(
+            result.equity, result.data, result.trades,
+            show_levels=args.show_levels,
+        )
         if args.update_readme_chart:
             stable = "backtest_results_full.png"
             shutil.copy2(ts_path, stable)

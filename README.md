@@ -50,6 +50,9 @@ python run.py --start 2021-01-01 --end 2024-01-01 --fast 20 --slow 100 --stop 0.
 # Skip chart generation
 python run.py --no-plot
 
+# Overlay swing points, Fibonacci levels, and trendlines on the price panel
+python run.py --start 2026-04-01 --show-levels
+
 # Update the README's canonical chart (backtest_results_full.png)
 python run.py --update-readme-chart
 ```
@@ -88,6 +91,68 @@ class MyStrategy(Strategy):
 ```
 
 Then pass it to `run_backtest()`.
+
+## Technical-analysis overlay (visualization only)
+
+`analysis/levels.py` is a standalone module (depends only on pandas + numpy,
+imports nothing from the engine) that marks chart structure. It exposes three
+functions, each returning plain dataclasses — no chart objects — so `run.py`
+and a future UI can consume them identically:
+
+- `find_swing_points(df, lookback=5)` — fractal swing highs/lows.
+- `compute_fib_levels(df, swing_points)` — Fibonacci retracement grid.
+- `fit_trendline(df, swing_points, side)` — OLS support/resistance line.
+
+Enable the overlay with `python run.py --show-levels` (or `plot_results(...,
+show_levels=True)` from code).
+
+### These are algorithmic approximations, not ground truth
+
+Each function implements **one** standard, defensible method — not "the"
+correct one. Two competent chartists routinely disagree on where a swing sits,
+which swing pair anchors a Fibonacci grid, and how a trendline should be drawn.
+This is the same honest framing as the [strategy regime-dependence](#strategy-regime-dependence)
+note below: the output is a *reproducible, documented approximation*, useful for
+visualization, not an authoritative read of the market. Every result carries
+metadata (method, parameters, analyzed range) so two runs with different
+settings are never silently conflated.
+
+The specific, documented choices:
+
+- **Swing points** — a bar is a swing high if its `high` is the strict, unique
+  maximum of a symmetric `2*lookback+1` window (inverse for lows). The first and
+  last `lookback` bars can never qualify (they lack bars on one side); too-short
+  series (`len < lookback*2+1`) return empty rather than erroring.
+- **Fibonacci** — anchored on the **most recent** swing high and **most recent**
+  swing low (regardless of order, as long as both exist). Levels: 23.6%, 38.2%,
+  50%, 61.8%, 78.6%. A degenerate (near-flat) range returns `None` instead of
+  five identical prices.
+- **Trendline** — OLS through the most recent swings of one type. Fit quality is
+  reported honestly: **R² below 0.5 is still returned but tagged
+  `low_confidence=True`** (drawn faint + dashed, not hidden). The line is
+  projected only **20%** of its swing-span past the last contributing swing, not
+  indefinitely across the chart. Fewer than `min_points` (default 3) swings
+  returns `None`.
+
+### Two lookback defaults, on purpose
+
+The swing `lookback` has **two intentionally different defaults** for two
+different jobs — this is a deliberate design choice, not an inconsistency:
+
+| Default | Where | Why |
+|---|---|---|
+| `lookback=5` | `find_swing_points()` | Detection default — maximum sensitivity, surfaces every minor pivot for a script/UI that wants them. |
+| `lookback=8` | chart overlay (`plot_results(show_levels=True)`) | Rendering default — fewer, more *significant* swings, which produces a legible Fibonacci grid and a clear high- vs low-confidence trendline contrast. At lookback 5 the "most recent high + most recent low" pair is often two adjacent minor pivots, collapsing the Fib grid into a thin band. |
+
+### ⚠️ Lookahead boundary — visualization only
+
+Swing detection is **centered**: a swing at bar `i` is only confirmed once
+`lookback` more bars print to its right. That is fine for charting historical
+data, but it means **these functions must NOT be called inside a strategy's
+`on_bar()` trading logic** — doing so would leak bars `i+1..i+lookback` into the
+decision at bar `i`, violating the engine's lookahead firewall. A causal
+(right-edge-only) variant would have to be written first; that adaptation is
+deliberately out of scope here.
 
 ## Sample results — SMA(50,200), 8% stop, 10k USDT
 

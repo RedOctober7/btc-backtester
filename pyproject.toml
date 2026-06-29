@@ -22,4 +22,4 @@ dev = ["pytest>=8.0"]
 testpaths = ["tests"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["data", "engine", "strategies", "metrics", "reporting"]
+packages = ["data", "engine", "strategies", "metrics", "reporting", "analysis"]
