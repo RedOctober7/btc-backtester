@@ -259,15 +259,25 @@ def _overlay_levels(ax, data: pd.DataFrame, lookback: int) -> None:
         ax.scatter(lows["pos"], lows["price"], marker="^", s=26,
                    color=_SWING_LOW_COLOR, edgecolors="none", zorder=5)
 
-    # ── Fibonacci retracement lines ────────────────────────────────────────
+    # ── Fibonacci retracement lines + spaced legend key ────────────────────
     fib = compute_fib_levels(data, swings)
     if fib is not None:
-        for ratio, price in fib.levels.items():
+        for price in fib.levels.values():
             ax.axhline(price, linestyle="--", linewidth=0.8,
                        color=_FIB_COLOR, alpha=0.55, zorder=3)
-            ax.text(n - 1, price, f" {ratio:.1%}  {price:,.0f}",
-                    color=_FIB_COLOR, fontsize=7, va="center", ha="right",
-                    alpha=0.9, zorder=6)
+        # When the anchoring swing range is narrow the five levels sit within a
+        # few hundred dollars; inline labels next to each dashed line then
+        # overlap into an illegible smear. Collect them into one spaced,
+        # monospaced key in axes-fraction space (top-left) so the row spacing is
+        # fixed regardless of how tight the price band is. The dashed lines stay
+        # unlabeled; the key decodes them, listed top (23.6%) to bottom (78.6%).
+        key_rows = [f"Fib {fib.swing_low[1]:,.0f}-{fib.swing_high[1]:,.0f}"]
+        key_rows += [f"{r:>5.1%} {p:>9,.0f}" for r, p in fib.levels.items()]
+        ax.text(0.012, 0.975, "\n".join(key_rows), transform=ax.transAxes,
+                color=_FIB_COLOR, fontsize=8, va="top", ha="left",
+                family="monospace", linespacing=1.4, zorder=7,
+                bbox=dict(facecolor="#0c0f17", edgecolor=_FIB_COLOR,
+                          alpha=0.88, linewidth=0.6, boxstyle="round,pad=0.4"))
 
     # ── Trendlines (support = teal, resistance = coral) ────────────────────
     for side, color in (("support", _SUPPORT_COLOR),
