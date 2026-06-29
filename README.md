@@ -106,6 +106,18 @@ and a future UI can consume them identically:
 Enable the overlay with `python run.py --show-levels` (or `plot_results(...,
 show_levels=True)` from code).
 
+### What the overlay draws
+
+- **Swing points** — small gold ▼ markers at highs, purple ▲ markers at lows.
+- **Fibonacci levels** — amber dashed horizontal lines at their true prices,
+  decoded by a compact legend key in the top-left corner. The labels live in the
+  key, not inline next to each line, so they stay readable even when the swing
+  range is narrow and the five levels sit within a few hundred dollars (inline
+  labels overlap into an illegible smear in that case).
+- **Trendlines** — teal for support, coral for resistance, each projected a
+  bounded distance past its last swing and tagged with its R² on the chart.
+  Low-confidence fits (R² < 0.5) are drawn faint and dashed rather than hidden.
+
 ### These are algorithmic approximations, not ground truth
 
 Each function implements **one** standard, defensible method — not "the"
