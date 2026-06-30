@@ -112,11 +112,16 @@ show_levels=True)` from code).
 - **Fibonacci levels** — amber dashed horizontal lines at their true prices,
   decoded by a compact legend key in the top-left corner. The labels live in the
   key, not inline next to each line, so they stay readable even when the swing
-  range is narrow and the five levels sit within a few hundred dollars (inline
-  labels overlap into an illegible smear in that case).
-- **Trendlines** — teal for support, coral for resistance, each projected a
-  bounded distance past its last swing and tagged with its R² on the chart.
-  Low-confidence fits (R² < 0.5) are drawn faint and dashed rather than hidden.
+  range is narrow. When the swing band is narrower than **8.5% of the visible
+  y-axis range** the five lines would merge into one indistinguishable smear, so
+  they are replaced by a single translucent shaded band (low..high); the legend
+  key still lists all five exact levels. (Measured: a trending window's band is
+  ~13.8% of its y-range → five lines; a choppy window's ~5.4% → shaded band.)
+- **Trendlines** — teal for support, coral for resistance, tagged with their R²
+  on the chart; low-confidence fits (R² < 0.5) drawn faint and dashed, not
+  hidden. Labels are clamped and vertically de-collided so none clips at either
+  edge or overlaps another, even when all four (two sides × two modes) land near
+  the same corner.
 
 ### These are algorithmic approximations, not ground truth
 
@@ -139,12 +144,10 @@ The specific, documented choices:
   swing low (regardless of order, as long as both exist). Levels: 23.6%, 38.2%,
   50%, 61.8%, 78.6%. A degenerate (near-flat) range returns `None` instead of
   five identical prices.
-- **Trendline** — OLS through the most recent swings of one type. Fit quality is
-  reported honestly: **R² below 0.5 is still returned but tagged
-  `low_confidence=True`** (drawn faint + dashed, not hidden). The line is
-  projected only **20%** of its swing-span past the last contributing swing, not
-  indefinitely across the chart. Fewer than `min_points` (default 3) swings
-  returns `None`.
+- **Trendline** — OLS through swing points of one type. Fit quality is reported
+  honestly: **R² below 0.5 is still returned but tagged `low_confidence=True`**
+  (drawn faint + dashed, not hidden). Fewer than `min_points` (default 3) swings
+  returns `None`. Point selection has two modes (`n_points`, below).
 
 ### Two lookback defaults, on purpose
 
@@ -155,6 +158,33 @@ different jobs — this is a deliberate design choice, not an inconsistency:
 |---|---|---|
 | `lookback=5` | `find_swing_points()` | Detection default — maximum sensitivity, surfaces every minor pivot for a script/UI that wants them. |
 | `lookback=8` | chart overlay (`plot_results(show_levels=True)`) | Rendering default — fewer, more *significant* swings, which produces a legible Fibonacci grid and a clear high- vs low-confidence trendline contrast. At lookback 5 the "most recent high + most recent low" pair is often two adjacent minor pivots, collapsing the Fib grid into a thin band. |
+
+### Recent-N vs. whole-window trendlines
+
+`fit_trendline(..., n_points=...)` answers two genuinely different questions, and
+the default is unchanged:
+
+| `n_points` | Mode | Question | Projection |
+|---|---|---|---|
+| int `N` (default `5`) | recent | "Is there a tradeable trend **right now**?" — fit the most recent N swings. | extends 20% of its span past the last swing (a short forward stub shows where the current trend points next) |
+| `"all"` | whole-window | "Was this entire period trending or choppy **overall**?" — fit every swing of that type across the range. | **none** — the line characterizes the past, not a forward breakout, so it stops at the last swing (extrapolating a multi-month slope forward is meaningless and visually absurd) |
+
+These can point in **opposite directions** — which is the whole point. On the
+2018-08 → 2019-04 BTC window (choppy overall; the SMA strategy lost money there),
+the support fits diverge sharply:
+
+| | recent-5 | all-swings |
+|---|---|---|
+| Support | R²=0.91, slope **+0.95/bar** (rising) | R²=0.71, slope **−2.83/bar** (falling) |
+| Resistance | R²=0.50, slope **+1.01/bar** (rising) | R²=0.78, slope **−2.99/bar** (falling) |
+
+Both recent-5 lines slope **up** — they caught the clean late-March 2019 bounce.
+Both all-swings lines slope **down** — they caught the 2018 bear decline. Recent-N
+is a *local* signal; "all" is a *global* characterization. (Note the all-swings
+fits aren't low-confidence chop — this window was a net decline with a choppy
+bottom, not pure sideways, and the regression honestly reports that.) On a chart,
+pass `trendline_n_points=(5, "all")` to draw both per side; "all"-mode lines are
+dotted and labeled `(all swings)` vs `(recent-5)`.
 
 ### ⚠️ Lookahead boundary — visualization only
 

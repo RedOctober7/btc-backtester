@@ -307,17 +307,19 @@ def compute_fib_levels(
 @dataclass(frozen=True)
 class Trendline:
     """
-    A straight line fit through recent swing points of one type.
+    A straight line fit through swing points of one type.
 
     Geometry is expressed in (position, price) space, where position is the
     integer bar index within the analyzed DataFrame. y = slope*pos + intercept.
 
-    x_start/x_end are positions (x_end may be fractional and project past the
-    last bar). start_time/end_time are the corresponding timestamps (end_time is
-    extrapolated at the average bar interval when the projection runs past the
-    final bar).
+    x_start/x_end are positions. In "recent" mode x_end projects past the last
+    swing (see TRENDLINE_PROJECTION_FRAC); in "all" mode there is NO projection
+    and x_end is exactly the last contributing swing. start_time/end_time are the
+    corresponding timestamps (end_time is extrapolated at the average bar
+    interval when a projection runs past the final bar).
     """
     side: str                          # "support" (lows) or "resistance" (highs)
+    mode: str                          # "recent" (most recent N) or "all" (whole window)
     slope: float                       # price change per bar
     intercept: float
     r_squared: float
@@ -325,7 +327,7 @@ class Trendline:
     n_points: int                      # number of swing points actually fit
     points_used: pd.DataFrame          # the swing points used (subset)
     x_start: float                     # position of first contributing point
-    x_end: float                       # projected end position
+    x_end: float                       # end position (projected in "recent" mode only)
     y_start: float
     y_end: float
     start_time: pd.Timestamp
@@ -338,31 +340,44 @@ def fit_trendline(
     swing_points: SwingPointResult,
     side: str = "resistance",
     min_points: int = 3,
-    n_points: int = 5,
+    n_points: "int | str" = 5,
 ) -> Optional[Trendline]:
     """
-    Fit a trendline through the most recent swing points of one type by ordinary
-    least-squares linear regression (price vs. bar position).
+    Fit a trendline through swing points of one type by ordinary least-squares
+    linear regression (price vs. bar position).
 
     side:       "resistance" fits swing HIGHs; "support" fits swing LOWs.
     min_points: minimum swing points of that type required to fit at all.
-    n_points:   use at most this many of the MOST RECENT qualifying swings.
+    n_points:   point-selection mode — answers a DIFFERENT question per value:
+        * int N (default 5) -> "recent" mode: fit the MOST RECENT N swings.
+          Answers "is there a tradeable trend RIGHT NOW." The line is projected
+          TRENDLINE_PROJECTION_FRAC (20%) of its span past the last swing, since
+          a short forward stub shows where a current trend points next.
+        * "all" -> "whole-window" mode: fit EVERY swing of this type across the
+          whole analyzed range. Answers "was this entire period trending or
+          choppy OVERALL." There is NO forward projection — the line is drawn
+          only between its first and last swing, because it characterizes the
+          past, not a current breakout, so extrapolating it forward is
+          meaningless (and over many months can be visually absurd).
+
+    These two modes can diverge sharply. On the 2018-08 -> 2019-04 BTC window
+    (choppy overall — the SMA strategy lost money there), the recent-5 support
+    line scored R^2=0.91 because the last five swing lows happened to sit on a
+    genuine late-March 2019 uptrend, while the "all"-swings support line over the
+    same data scores far lower, correctly reflecting the period's overall chop.
+    Recent-N is a LOCAL signal; "all" is a GLOBAL characterization.
 
     This is ONE algorithmic method among several valid ones. A human chartist
     would often anchor on two touches, weight the most recent reaction, or draw
     along wicks vs. bodies — and would frequently draw a different line. This
     regression is reproducible and auditable, not authoritative.
 
-    Failsafes:
+    Failsafes (identical in both modes except point-selection and projection):
         * Fewer than `min_points` swings of the relevant type -> None (we do not
           fit a "trend" through one or two points).
         * Fit quality is reported honestly: R^2 is always computed, and a fit
           with R^2 < LOW_CONFIDENCE_R2 (0.5) is still returned but tagged
-          low_confidence=True. The function never hides a poor fit; the renderer
-          decides whether to gray it out or skip it.
-        * The drawn line is bounded: it is projected only TRENDLINE_PROJECTION_FRAC
-          (20%) of the swing-point span past the last contributing swing, not
-          indefinitely across the chart.
+          low_confidence=True. The function never hides a poor fit.
 
     Rolling: stateless — refit by re-calling with freshly recomputed
     swing_points whenever a new swing appears.
@@ -377,11 +392,26 @@ def fit_trendline(
     else:
         raise ValueError(f"side must be 'resistance' or 'support', got {side!r}")
 
+    # Resolve point-selection mode.
+    if isinstance(n_points, str):
+        if n_points.lower() != "all":
+            raise ValueError(
+                f"n_points must be a positive int or 'all', got {n_points!r}")
+        whole_window = True
+    elif isinstance(n_points, int) and not isinstance(n_points, bool) and n_points >= 1:
+        whole_window = False
+    else:
+        raise ValueError(
+            f"n_points must be a positive int or 'all', got {n_points!r}")
+
+    mode = "all" if whole_window else "recent"
+
     swing_lookback = swing_points.metadata.params.get("lookback")
     metadata = AnalysisMetadata(
         method="ols_trendline",
         params={
             "side": side,
+            "mode": mode,
             "min_points": min_points,
             "n_points": n_points,
             "swing_lookback": swing_lookback,
@@ -397,7 +427,8 @@ def fit_trendline(
     if len(pts) < max(min_points, 2):
         return None
 
-    used = pts.iloc[-n_points:]  # most recent N
+    # Point selection: every swing ("all") or the most recent N ("recent").
+    used = pts if whole_window else pts.iloc[-n_points:]
     x = used["pos"].to_numpy(dtype=float)
     y = used["price"].to_numpy(dtype=float)
 
@@ -414,7 +445,15 @@ def fit_trendline(
     last_pos = float(x[-1])
     span = last_pos - first_pos
     x_start = first_pos
-    x_end = last_pos + TRENDLINE_PROJECTION_FRAC * span
+    # Projection rule differs by mode:
+    #   recent      -> extend 20% of span past the last swing (where does the
+    #                  current trend point next?).
+    #   whole-window -> NO projection; the line characterizes the past window,
+    #                  not a forward breakout, so it stops at the last swing.
+    if whole_window:
+        x_end = last_pos
+    else:
+        x_end = last_pos + TRENDLINE_PROJECTION_FRAC * span
     y_start = float(slope * x_start + intercept)
     y_end = float(slope * x_end + intercept)
 
@@ -432,6 +471,7 @@ def fit_trendline(
 
     return Trendline(
         side=side,
+        mode=mode,
         slope=float(slope),
         intercept=float(intercept),
         r_squared=float(r_squared),

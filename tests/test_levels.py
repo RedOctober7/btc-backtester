@@ -244,6 +244,91 @@ def test_trendline_invalid_side_raises():
 
 
 # ---------------------------------------------------------------------------
+# 3b. Trendline: recent-N vs whole-window ("all") modes
+# ---------------------------------------------------------------------------
+
+def test_trendline_all_mode_fits_every_swing():
+    specs = [(p, 100.0 - p, "low") for p in range(0, 60, 6)]  # 10 lows
+    swings, df = _make_swings(specs, n_bars=80)
+    recent = fit_trendline(df, swings, side="support", n_points=5)
+    allsw = fit_trendline(df, swings, side="support", n_points="all")
+    assert recent.mode == "recent" and recent.n_points == 5
+    assert allsw.mode == "all" and allsw.n_points == len(specs)
+
+
+def test_trendline_modes_diverge_opposite_slopes():
+    # A long decline with a clean rising recent tail of 5 lows. Recent-N sees the
+    # local bounce (rising, R^2~1); whole-window sees the net decline (falling).
+    # OPPOSITE slope signs prove the two modes answer different questions, not
+    # merely take different inputs.
+    decline = [(p, 100.0 - 0.7 * p, "low") for p in (0, 10, 20, 30, 40, 50, 60, 70)]
+    tail = [(78, 53.0), (86, 58.0), (94, 63.0), (102, 68.0), (110, 73.0)]
+    specs = decline + [(p, v, "low") for p, v in tail]
+    swings, df = _make_swings(specs, n_bars=130)
+
+    recent = fit_trendline(df, swings, side="support", n_points=5)
+    whole = fit_trendline(df, swings, side="support", n_points="all")
+
+    assert recent.r_squared > 0.99               # clean local uptrend
+    assert recent.slope > 0                       # rising
+    assert whole.slope < 0                        # falling -- OPPOSITE direction
+    assert whole.r_squared < recent.r_squared - 0.3   # materially different
+    assert recent.mode == "recent" and whole.mode == "all"
+
+
+def test_trendline_all_mode_has_no_projection():
+    specs = [(p, 100.0 - 0.7 * p, "low") for p in (0, 10, 20, 30, 40, 50)]
+    swings, df = _make_swings(specs, n_bars=80)
+    whole = fit_trendline(df, swings, side="support", n_points="all")
+    recent = fit_trendline(df, swings, side="support", n_points=5)
+    # whole-window: the line stops AT the last swing (no forward projection).
+    assert whole.x_end == pytest.approx(float(whole.points_used["pos"].iloc[-1]))
+    # recent: the line projects PAST the last swing.
+    assert recent.x_end > recent.points_used["pos"].iloc[-1]
+
+
+def test_trendline_invalid_n_points_raises():
+    swings, df = _make_swings([(p, float(p), "high") for p in (0, 5, 10, 15)])
+    with pytest.raises(ValueError):
+        fit_trendline(df, swings, side="resistance", n_points="recent")
+    with pytest.raises(ValueError):
+        fit_trendline(df, swings, side="resistance", n_points=0)
+
+
+# Real-data regression on the 2018-08 -> 2019-04 choppy window. The cache parquet
+# is gitignored, so skip cleanly when it's absent (fresh checkout / CI); the
+# synthetic tests above cover the behavior hermetically.
+_CACHE_2018 = (Path(__file__).resolve().parents[1]
+               / "cache" / "BTCUSDT_4h_2018-08-01_2019-04-01.parquet")
+
+
+@pytest.mark.skipif(not _CACHE_2018.exists(),
+                    reason="2018-2019 cache parquet absent (cache/ is gitignored)")
+def test_2018_2019_recent_vs_all_modes_diverge():
+    from data.loader import load_candles
+    data = load_candles("BTCUSDT", "4h", "2018-08-01", "2019-04-01")
+    sw = find_swing_points(data, lookback=8)
+
+    recent = fit_trendline(data, sw, side="support", n_points=5)
+    whole = fit_trendline(data, sw, side="support", n_points="all")
+
+    # Recent-5 reproduces the high-confidence late-March 2019 local uptrend.
+    assert recent.mode == "recent"
+    assert recent.r_squared == pytest.approx(0.9102, abs=0.01)
+    assert recent.slope > 0                              # rising (local bounce)
+
+    # Whole-window fits all ~68 lows and tells a DIFFERENT story: the period's
+    # net decline. Materially lower R^2 AND the opposite slope sign.
+    assert whole.mode == "all"
+    assert whole.n_points > 50
+    assert whole.r_squared == pytest.approx(0.7149, abs=0.02)
+    assert whole.slope < 0                               # falling (net bear leg)
+    assert whole.r_squared < recent.r_squared            # answers a different question
+    # No forward projection in whole-window mode.
+    assert whole.x_end == pytest.approx(float(whole.points_used["pos"].iloc[-1]))
+
+
+# ---------------------------------------------------------------------------
 # 4. Decoupling — analysis must not leak into engine/strategies/broker
 # ---------------------------------------------------------------------------
 
