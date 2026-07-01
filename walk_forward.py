@@ -294,10 +294,66 @@ if __name__ == "__main__":
     factory = lambda p: MACrossover(**p)
     grid = {"fast_period": [20, 30], "slow_period": [200], "stop_pct": [0.08]}
 
+    # Split before walk_forward so folds never touch holdout
+    HOLDOUT_START = "2026-03-01"
+    holdout_mask = data.index >= pd.Timestamp(HOLDOUT_START, tz="UTC")
+    dev_data     = data[~holdout_mask]
+    holdout_data = data[holdout_mask]
+
     res = walk_forward(
-        data, factory, grid,
+        dev_data, factory, grid,
         WFConfig(is_bars=1080, oos_bars=180, warmup_bars=250),
     )
     print(res.summary())
     print()
     print(res.to_dataframe().to_string(index=False))
+
+    # ══════════════════════════════════════════════════════════════════════
+    # TRUE HOLDOUT TEST — one shot, no tuning, never seen by any fold above
+    # ══════════════════════════════════════════════════════════════════════
+    FIXED_PARAMS = {"fast_period": 20, "slow_period": 200, "stop_pct": 0.08}
+    WARMUP = 250
+
+    # Confirm walk_forward() never touched holdout — last fold's oos_end is an
+    # integer index into `data`; translate to timestamp for the check.
+    last_fold_end_ts = data.index[res.folds[-1].oos_end - 1]
+    holdout_first_ts = holdout_data.index[0]
+
+    print()
+    print("=" * 68)
+    print("TRUE HOLDOUT TEST")
+    print(f"  dev_data   : {dev_data.index[0].date()} -> {dev_data.index[-1].date()}  ({len(dev_data)} bars)")
+    print(f"  holdout    : {holdout_first_ts.date()} -> {holdout_data.index[-1].date()}  ({len(holdout_data)} bars)")
+    print(f"  last fold ended at bar index {res.folds[-1].oos_end - 1} ({last_fold_end_ts.date()})")
+    print(f"  holdout starts at {holdout_first_ts.date()} — {'CLEAN (no overlap)' if last_fold_end_ts < holdout_first_ts else 'OVERLAP — not clean'}")
+    print(f"  fixed params: {FIXED_PARAMS}")
+    print("=" * 68)
+
+    # Prepend warmup bars from dev_data so indicators are warm at holdout[0]
+    warmup_slice = dev_data.iloc[-WARMUP:]
+    run_data     = pd.concat([warmup_slice, holdout_data])
+
+    cfg_holdout = WFConfig(
+        initial_capital=10_000.0, fee_rate=0.001,
+        slippage_bps=0.0, position_fraction=1.0,
+    )
+    holdout_res = _run(factory(FIXED_PARAMS), run_data, cfg_holdout)
+
+    # Strip the warmup portion from equity and trades before reporting
+    holdout_equity = holdout_res.equity.iloc[WARMUP:]
+    holdout_trades = sum(
+        1 for t in holdout_res.trades
+        if t.exit_bar_idx is not None and t.exit_bar_idx >= WARMUP
+    )
+
+    h_return = M.total_return(holdout_equity)
+    h_cagr   = M.cagr(holdout_equity)
+    h_sharpe = M.sharpe_ratio(holdout_equity)
+    h_dd, _  = M.max_drawdown(holdout_equity)
+
+    print(f"  return     : {h_return:+.2f}%")
+    print(f"  CAGR       : {h_cagr:+.2f}%")
+    print(f"  Sharpe     : {h_sharpe:.2f}")
+    print(f"  max DD     : {h_dd:.2f}%")
+    print(f"  trades     : {holdout_trades}")
+    print("=" * 68)
