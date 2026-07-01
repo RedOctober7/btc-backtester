@@ -258,6 +258,55 @@ because no parameter set makes a crossover strategy profitable in a directionles
 This is precisely why walk-forward testing and regime detection exist — and why they are
 correctly out of scope for this v1.
 
+## Walk-Forward Analysis
+
+A single backtest optimizes parameters on the same data it then measures — the result is an in-sample fit, not a forward estimate. Walk-forward analysis breaks that circularity: optimize parameters on an in-sample (IS) window, test the winning parameters on the very next out-of-sample (OOS) window the optimizer never saw, roll the window forward, and repeat. Stitching the OOS segments together produces one continuous equity curve built entirely from data the optimizer was blind to. Walk-Forward Efficiency (WFE) is the ratio of annualized OOS return to annualized IS return; it measures how much of the IS edge survives contact with unseen data rather than evaporating as overfit.
+
+### How to run
+
+```powershell
+python walk_forward.py
+```
+
+Parameters, grid, IS/OOS window sizes, and the holdout split date are all set inside the `__main__` block of `walk_forward.py` at the repo root.
+
+### How to read WFE
+
+| WFE | Interpretation |
+|---|---|
+| >= 60% | Robust — OOS captures most of the IS edge |
+| 40–60% | Marginal — real signal present, IS optimizer somewhat optimistic |
+| < 40% | Overfit — IS edge does not carry to OOS |
+
+### MACrossover results (SMA 20/200, 8% stop)
+
+The grid search was narrowed through three iterations (27 combos → 6 → 2) after observing WFE of 17% on the full grid. With `slow_period` fixed to 200, WFE stabilized at 53%.
+
+**Dev period walk-forward OOS (2022-01 to 2026-02, 44 folds):**
+
+| Metric | Value |
+|---|---|
+| Stitched OOS return | +83.6% |
+| CAGR | +18.3% |
+| Sharpe | 0.81 |
+| Max Drawdown | -25.0% |
+| WFE | 53% (marginal) |
+| Param churn | fast 23%, slow 0%, stop 0% (stable) |
+
+**True holdout (2026-03-01 to 2026-06-25, never seen by any fold):**
+
+| Metric | Value |
+|---|---|
+| Return | -5.3% |
+| CAGR | -15.7% |
+| Sharpe | -0.57 |
+| Max Drawdown | -12.2% |
+| Trades | 3 |
+
+The holdout result is negative. This does not validate or invalidate the strategy — 3 trades over 4 months is too small a sample to draw a statistical conclusion either way. The loss is consistent with the choppy/sideways BTC regime that has persisted since the post-ATH oscillation began in late 2024, which matches the known whipsaw pattern documented in the regime-dependence section. That is a plausible explanation, not a proven one.
+
+**These numbers are a development-period diagnostic, not a live-trading signal.** WFE of 53% indicates the IS optimizer is partially overfitting; the negative holdout coincides with an unfavorable regime; and no position-sizing, risk management, or regime filter has been applied. Do not interpret any result in this section as evidence the strategy is ready for live trading.
+
 ## Correctness guarantees
 
 1. **No lookahead**: `Context._data = data.iloc[:t+1]` -- future rows are absent, not just hidden.
@@ -272,7 +321,7 @@ correctly out of scope for this v1.
 
 - Long-or-flat only. No shorting, leverage, or margin.
 - Single asset. No portfolio.
-- No walk-forward analysis or parameter optimization.
+- No parameter optimization beyond the walk-forward grid search in `walk_forward.py`.
 - No intrabar stop (stop evaluates at close, exits at next open -- see `ma_crossover.py`).
 - No web UI, no live trading.
 
