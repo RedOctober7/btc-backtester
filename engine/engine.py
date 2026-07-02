@@ -3,16 +3,29 @@ Event-driven backtest loop.
 
 Bar-by-bar execution (not vectorized) makes lookahead impossible by construction:
 when the strategy runs on bar t, only bars 0..t exist in the Context.
-Vectorized execution would be faster but hides the very class of bugs this engine
-exists to prevent; vectorizing is a deliberate later optimization.
 
 Execution order per bar t:
     1. Fill any orders queued on bar t-1 at bar t's OPEN price.
-    2. Record whether a position is held at bar-start (for exposure metric).
-    3. Call strategy.on_bar(context) — strategy may queue orders for bar t+1.
-    4. If this is the final bar and a position is still open, force-close it
-       at bar t's CLOSE (no bar t+1 exists to fill a queued order).
-    5. Mark equity to market at bar t's CLOSE.
+    2. FUNDING (perps, leverage runs): on 8h-aligned bars, charge/credit one
+       funding interval at the bar's open price. Applied BEFORE the liquidation
+       check because eroded margin pulls the liquidation trigger closer — the
+       order matters and this is the conservative one.
+    3. LIQUIDATION CHECK (leverage > 1 only): if the position's liquidation
+       trigger falls inside this bar's range, force-close. Gap-aware: a bar
+       that OPENS beyond the trigger fills at the open (you eat the gap), a bar
+       that trades through it intrabar fills at the trigger. Checked against
+       high/low, never just close — a real exchange liquidates the instant
+       price touches the level; close-only checking would let leveraged
+       positions "survive" bars that would have wiped them out live.
+       ORDERING NOTE (documented ambiguity): when a single bar hits both the
+       strategy's stop (evaluated on close, exits next bar) and the liquidation
+       trigger (intrabar), liquidation wins. OHLC data cannot reveal which came
+       first inside the bar; resolving in favor of liquidation is the
+       pessimistic choice, consistent with this engine's design rule.
+    4. Record whether a position is held at bar-start (exposure metric).
+    5. Call strategy.on_bar(context) — may queue orders for bar t+1.
+    6. Final bar: discard queued orders, force-close any open position at close.
+    7. Mark equity to market at bar t's CLOSE.
 """
 from __future__ import annotations
 
@@ -27,10 +40,16 @@ from strategies.base import Strategy
 
 @dataclass
 class BacktestResult:
-    equity: pd.Series            # per-bar equity curve (one entry per bar)
-    trades: list[Trade]          # completed round-trips
-    data: pd.DataFrame           # the OHLCV data used
-    in_position: pd.Series       # bool per bar: True if position held at bar-start
+    equity: pd.Series
+    trades: list[Trade]
+    data: pd.DataFrame
+    in_position: pd.Series
+
+
+def _is_funding_bar(timestamp: pd.Timestamp) -> bool:
+    """Perp funding settles every 8h at 00:00/08:00/16:00 UTC. On 4h bars that
+    is every second bar; on other frequencies only the aligned bars charge."""
+    return timestamp.hour % 8 == 0 and timestamp.minute == 0
 
 
 def run_backtest(
@@ -40,28 +59,32 @@ def run_backtest(
     fee_rate: float = 0.001,
     slippage_bps: float = 0.0,
     position_fraction: float = 1.0,
+    leverage: float = 1.0,
+    maintenance_margin_rate: float = 0.005,
+    funding_rate_8h: float = 0.0,
+    liquidation_penalty_bps: float = 0.0,
 ) -> BacktestResult:
     """
-    Run the backtest. Returns equity curve, trade blotter, and per-bar position state.
+    Run the backtest. All new parameters default to the v1 spot behavior:
+    leverage=1, funding=0, penalty=0 reproduces the original engine exactly.
 
-    Parameters
-    ----------
-    strategy         : Strategy instance (init() has not been called yet)
-    data             : OHLCV DataFrame indexed by open_time (UTC), sorted ascending
-    initial_capital  : starting cash in USDT
-    fee_rate         : taker fee per side (0.001 = 0.1%)
-    slippage_bps     : fill slippage in basis points (fills move against you)
-    position_fraction: fraction of equity deployed per entry (1.0 = 100%)
+    funding_rate_8h : signed per-8h perp funding rate. Positive = longs pay,
+        shorts receive (the common resting state, ~0.0001). Set this whenever
+        leverage > 1 or the backtest will flatter every leveraged hold.
+    liquidation_penalty_bps : extra adverse slippage applied to forced
+        liquidation fills, modeling cascade conditions.
     """
     broker = Broker(
         initial_capital=initial_capital,
         fee_rate=fee_rate,
         slippage_bps=slippage_bps,
         position_fraction=position_fraction,
+        leverage=leverage,
+        maintenance_margin_rate=maintenance_margin_rate,
+        funding_rate_8h=funding_rate_8h,
+        liquidation_penalty_bps=liquidation_penalty_bps,
     )
 
-    # strategy.init() receives the full dataset ONCE — the only place full data is allowed.
-    # It is expected to precompute only backward-looking (strictly causal) indicators.
     strategy.init(data)
 
     pending_orders: list[Order] = []
@@ -72,26 +95,37 @@ def run_backtest(
         bar = data.iloc[t]
         timestamp = data.index[t]
         is_final_bar = t == n_bars - 1
+        bar_open = float(bar["open"])
 
-        # ── Step 1: Fill orders from bar t-1 at bar t's OPEN ──────────────────
-        # This is the "next-bar open" fill rule: signals queue here, fill next bar.
+        # ── 1. Fill queued orders at this bar's OPEN ─────────────────────────
         if pending_orders:
-            open_price = float(bar["open"])
             for order in pending_orders:
                 if order.action == "buy":
-                    broker.fill_buy(open_price, timestamp, bar_idx=t)
+                    broker.fill_buy(bar_open, timestamp, bar_idx=t)
+                elif order.action == "short":
+                    broker.fill_short(bar_open, timestamp, bar_idx=t)
                 elif order.action == "close":
-                    broker.fill_close(open_price, timestamp, reason=order.reason, bar_idx=t)
+                    broker.fill_close(bar_open, timestamp, reason=order.reason, bar_idx=t)
             pending_orders.clear()
 
-        # ── Step 2: Record position state at bar-start (after fills) ──────────
+        # ── 2. Funding (before liquidation: eroded margin moves the trigger) ──
+        if _is_funding_bar(timestamp):
+            broker.apply_funding(bar_open, timestamp)
+
+        # ── 3. Intrabar, gap-aware liquidation check ─────────────────────────
+        broker.maybe_liquidate(
+            bar_open, float(bar["high"]), float(bar["low"]), timestamp, t
+        )
+
+        # ── 4. Position state at bar-start (after fills, funding, liq) ────────
         in_position_list.append(broker.has_position)
 
-        # ── Step 3: Build context (lookahead firewall) and call strategy ───────
+        # ── 5. Strategy sees the world through the lookahead firewall ─────────
         position_info = PositionInfo(
             has_position=broker.has_position,
             entry_price=broker.entry_price or 0.0,
-            size=broker.btc_held,
+            size=broker.size,
+            direction=broker.direction,
         )
         context = Context(data, t, position_info)
         strategy.on_bar(context)
@@ -99,15 +133,11 @@ def run_backtest(
         if not is_final_bar:
             pending_orders = context.pop_orders()
         else:
-            # Discard any orders the strategy queued (no bar t+1 to fill them)
             context.pop_orders()
-            # Force-close any remaining position at this bar's CLOSE
             if broker.has_position:
-                broker.fill_close(
-                    float(bar["close"]), timestamp, reason="end_of_data", bar_idx=t
-                )
+                broker.fill_close(float(bar["close"]), timestamp, reason="end_of_data", bar_idx=t)
 
-        # ── Step 5: Mark equity to market at bar t's CLOSE ────────────────────
+        # ── 7. Mark to market at close ────────────────────────────────────────
         broker.mark_to_market(timestamp, float(bar["close"]))
 
     return BacktestResult(

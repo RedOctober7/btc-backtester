@@ -4,8 +4,14 @@ The lookahead firewall.
 When the engine calls the strategy on bar t, it constructs a Context from
 data.iloc[:t+1]. The strategy can only see bars 0..t. Bar t+1 and beyond are
 not in the object — accessing them raises IndexError, not a silent wrong value.
+
+v2: strategies may now open shorts (context.sell_short()) as well as longs
+(context.buy()). context.close_position() closes whichever is open. A strategy
+that never calls sell_short() behaves exactly as before.
 """
 from dataclasses import dataclass
+from typing import Optional
+
 import pandas as pd
 
 
@@ -13,15 +19,24 @@ import pandas as pd
 class PositionInfo:
     """Read-only snapshot of the broker's position, passed through Context."""
     has_position: bool
-    entry_price: float   # 0.0 when no position
-    size: float          # BTC held; 0.0 when no position
+    entry_price: float                 # 0.0 when no position
+    size: float                        # BTC held; 0.0 when no position
+    direction: Optional[str] = None    # "long" | "short" | None when flat
+
+    @property
+    def is_long(self) -> bool:
+        return self.direction == "long"
+
+    @property
+    def is_short(self) -> bool:
+        return self.direction == "short"
 
 
 @dataclass
 class Order:
     """A pending order queued by the strategy; filled by the broker on the next bar's open."""
-    action: str      # "buy" or "close"
-    reason: str = "signal"  # "crossover", "stop", "end_of_data" — recorded in trade blotter
+    action: str      # "buy" | "short" | "close"
+    reason: str = "signal"  # "crossover", "stop", "end_of_data", "liquidation"
 
 
 class Context:
@@ -64,11 +79,15 @@ class Context:
         return self._data.index[-1]
 
     def buy(self) -> None:
-        """Queue a buy order; executed at the NEXT bar's open — never the current close."""
+        """Queue a long entry; executed at the NEXT bar's open — never the current close."""
         self._orders.append(Order(action="buy"))
 
+    def sell_short(self) -> None:
+        """Queue a short entry; executed at the NEXT bar's open."""
+        self._orders.append(Order(action="short"))
+
     def close_position(self, reason: str = "signal") -> None:
-        """Queue a close order; executed at the NEXT bar's open."""
+        """Queue a close of whichever position is open; executed at the NEXT bar's open."""
         self._orders.append(Order(action="close", reason=reason))
 
     def pop_orders(self) -> list[Order]:
