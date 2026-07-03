@@ -34,25 +34,44 @@ BARS_PER_YEAR = M.BARS_PER_YEAR  # 2190 for 4h crypto bars
 # ══════════════════════════════════════════════════════════════════════════
 
 def _default_score(r: BacktestResult) -> float:
+    """Score a fold's backtest during IS optimization; higher = better.
+    Default is annualized Sharpe. For crypto, Calmar (CAGR / |maxDD|) is arguably
+    the better target since it punishes the deep drawdowns Sharpe waves through —
+    swap it in via WFConfig.score if you want that."""
     return M.sharpe_ratio(r.equity)
 
 
 @dataclass
 class WFConfig:
-    is_bars: int = 1080
-    oos_bars: int = 180
-    warmup_bars: int = 200
-    anchored: bool = False
+    # window geometry, in 4h bars
+    is_bars: int = 1080          # in-sample window  (~6 months at 6 bars/day)
+    oos_bars: int = 180          # out-of-sample window (~1 month)
+    warmup_bars: int = 200       # >= longest indicator lookback (slow_period, etc.).
+                                 # Prepended to each OOS slice so SMAs can warm up;
+                                 # leave too low and long-lookback folds read as flat.
+    anchored: bool = False       # False = rolling (slides); True = anchored (IS grows).
+                                 # Rolling is the right default for BTC — it lets the
+                                 # optimizer forget dead regimes.
+    # broker settings — passed straight through to your run_backtest
     initial_capital: float = 10_000.0
     fee_rate: float = 0.001
     slippage_bps: float = 0.0
     position_fraction: float = 1.0
+    leverage: float = 1.0             # 1.0 = spot-equivalent. Start every new
+                                       # strategy's walk-forward at 1.0 first —
+                                       # find out if it has edge BEFORE adding
+                                       # leverage risk on top of an unproven signal.
+    funding_rate_8h: float = 0.0      # set a real resting rate (~0.0001) whenever
+                                       # leverage > 1, or OOS results overstate holds.
+    maintenance_margin_rate: float = 0.005
+    liquidation_penalty_bps: float = 0.0
+    # IS optimization target
     score: Callable[[BacktestResult], float] = field(default=_default_score)
     score_name: str = "Sharpe"
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# Helpers
+# Small return helpers (fractions, so the WFE math stays honest about units)
 # ══════════════════════════════════════════════════════════════════════════
 
 def _return_frac(equity: pd.Series) -> float:
@@ -60,6 +79,21 @@ def _return_frac(equity: pd.Series) -> float:
     if len(equity) < 2 or equity.iloc[0] == 0:
         return 0.0
     return float(equity.iloc[-1] / equity.iloc[0] - 1.0)
+
+
+def _safe_sharpe(equity: pd.Series) -> float:
+    """Sharpe that returns 0.0 instead of NaN on degenerate curves (all-zero
+    after a wipeout, too short, or zero-variance). A dead account has no
+    risk-adjusted return; 0.0 with the wipeout reported elsewhere is honest,
+    NaN in a metrics table is just noise."""
+    eq = equity.dropna()
+    if len(eq) < 2 or float(eq.iloc[0]) <= 0.0:
+        return 0.0
+    rets = eq.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
+    std = float(rets.std()) if len(rets) else 0.0
+    if not np.isfinite(std) or std == 0.0:
+        return 0.0
+    return float((rets.mean() / std) * np.sqrt(BARS_PER_YEAR))
 
 
 def _annualize(ret_frac: float, n_bars: int) -> float:
@@ -76,18 +110,27 @@ def _annualize(ret_frac: float, n_bars: int) -> float:
 class Fold:
     index: int
     is_start: int
-    oos_start: int
-    oos_end: int
+    oos_start: int         # also = is_end (exclusive)
+    oos_end: int           # exclusive
     best_params: dict
-    is_score: float
-    is_return: float
-    oos_return: float
-    oos_sharpe: float
+    is_score: float        # optimization score on IS (clean — this picked the params)
+    is_return: float       # fraction, over IS window
+    oos_return: float      # fraction, over trimmed OOS window (honest)
+    oos_sharpe: float      # Sharpe on trimmed OOS equity
     oos_trades: int
-    oos_equity: pd.Series
+    oos_liquidations: int  # count of OOS trades that ended in forced liquidation
+    warmup_wiped: bool     # True if the account was liquidated to zero DURING the
+                           # warmup bars, before the OOS window began. The fold is
+                           # then UNMEASURABLE — an artifact of trading through
+                           # warmup, not a real OOS outcome — and is excluded from
+                           # stitching. Any nonzero count is a red flag that this
+                           # leverage level dies on this data's volatility.
+    oos_equity: pd.Series  # trimmed to the true OOS region
 
 
 def _make_folds(n: int, cfg: WFConfig) -> Iterator[tuple[int, int, int, int]]:
+    """Yield (index, is_start, oos_start, oos_end). OOS windows are contiguous and
+    non-overlapping so their equity curves stitch into one clean series."""
     oos_start, i = cfg.is_bars, 0
     while oos_start + cfg.oos_bars <= n:
         oos_end = oos_start + cfg.oos_bars
@@ -99,7 +142,7 @@ def _make_folds(n: int, cfg: WFConfig) -> Iterator[tuple[int, int, int, int]]:
 
 def _combos(grid: dict[str, list]) -> list[dict]:
     if not grid:
-        raise ValueError("param_grid is empty.")
+        raise ValueError("param_grid is empty — give at least one param to sweep.")
     keys = list(grid)
     return [dict(zip(keys, vals)) for vals in itertools.product(*(grid[k] for k in keys))]
 
@@ -111,6 +154,10 @@ def _run(strategy: Strategy, data: pd.DataFrame, cfg: WFConfig) -> BacktestResul
         fee_rate=cfg.fee_rate,
         slippage_bps=cfg.slippage_bps,
         position_fraction=cfg.position_fraction,
+        leverage=cfg.leverage,
+        funding_rate_8h=cfg.funding_rate_8h,
+        maintenance_margin_rate=cfg.maintenance_margin_rate,
+        liquidation_penalty_bps=cfg.liquidation_penalty_bps,
     )
 
 
@@ -119,12 +166,12 @@ def _optimize(
     factory: Callable[[dict], Strategy], grid: dict, cfg: WFConfig,
 ) -> tuple[float, dict, BacktestResult]:
     df_is = data.iloc[is_start:oos_start]
-    best = None
+    best = None  # (score, params, result)
     for params in _combos(grid):
         res = _run(factory(params), df_is, cfg)
         s = cfg.score(res)
         if s is None or (isinstance(s, float) and np.isnan(s)):
-            s = -np.inf
+            s = -np.inf   # e.g. a combo that never trades — never let it win
         if best is None or s > best[0]:
             best = (s, params, res)
     return best
@@ -140,6 +187,14 @@ def walk_forward(
     param_grid: dict[str, list],
     cfg: WFConfig = WFConfig(),
 ) -> "WFResult":
+    """
+    data              : OHLCV DataFrame, UTC-indexed ascending (same shape your
+                        engine already eats).
+    strategy_factory  : params dict -> Strategy instance,
+                        e.g. lambda p: MACrossover(**p)
+    param_grid        : {param_name: [values]}; the cartesian product is swept on
+                        every IS window. Keep it lean — combos x folds full runs.
+    """
     n = len(data)
     need = cfg.is_bars + cfg.oos_bars
     if n < need:
@@ -151,16 +206,26 @@ def walk_forward(
             data, is_start, oos_start, strategy_factory, param_grid, cfg
         )
 
+        # OOS run gets warmup history prepended, then we trim back to the true
+        # OOS region. Without warmup, any lookback > oos_bars reads as flat.
         run_start = max(0, oos_start - cfg.warmup_bars)
         oos_res = _run(strategy_factory(best_params), data.iloc[run_start:oos_end], cfg)
 
+        # Trim positionally, not by timestamp: the engine marks equity once per
+        # bar, so the OOS region is exactly the tail after the warmup offset.
+        # (Label matching would break silently if your index is tz-naive while
+        # the broker force-localizes equity to UTC.)
         oos_offset = oos_start - run_start
         oos_equity = oos_res.equity.iloc[oos_offset:]
 
-        oos_trades = sum(
-            1 for t in oos_res.trades
+        # trades realized (exited) inside the OOS window, not the warmup tail
+        oos_window_trades = [
+            t for t in oos_res.trades
             if t.exit_bar_idx is not None and t.exit_bar_idx >= oos_offset
-        )
+        ]
+        oos_trades = len(oos_window_trades)
+        oos_liquidations = sum(1 for t in oos_window_trades if t.exit_reason == "liquidation")
+        warmup_wiped = len(oos_equity) > 0 and float(oos_equity.iloc[0]) <= 0.0
 
         folds.append(Fold(
             index=i, is_start=is_start, oos_start=oos_start, oos_end=oos_end,
@@ -168,8 +233,10 @@ def walk_forward(
             is_score=float(is_score),
             is_return=_return_frac(is_res.equity),
             oos_return=_return_frac(oos_equity),
-            oos_sharpe=M.sharpe_ratio(oos_equity) if len(oos_equity) > 1 else 0.0,
+            oos_sharpe=_safe_sharpe(oos_equity),
             oos_trades=oos_trades,
+            oos_liquidations=oos_liquidations,
+            warmup_wiped=warmup_wiped,
             oos_equity=oos_equity,
         ))
 
@@ -190,13 +257,36 @@ class WFResult:
         self._compute_oos_metrics()
 
     def _stitch(self) -> pd.Series:
+        """Compound the OOS segments into one continuous curve (each fold picks up
+        where the last left off).
+
+        RUIN SEMANTICS (matters at leverage): if the compounded capital reaches
+        ~zero, the account is dead and STAYS dead — the rest of the curve
+        flatlines at zero. Without this, a fold whose equity starts at 0 (e.g.
+        liquidated during its warmup prepend) divides by zero and poisons the
+        entire stitched curve and every downstream metric with NaN. A real
+        trader who blew up does not get a fresh bankroll next fold; neither
+        does this curve.
+        """
+        EPS = 1e-9
         pieces, capital = [], float(self.cfg.initial_capital)
+        self.ruined = False           # exposed so summary() can shout about it
         for f in self.folds:
             eq = f.oos_equity.dropna()
             if eq.empty:
                 continue
-            pieces.append(eq / eq.iloc[0] * capital)
-            capital = pieces[-1].iloc[-1]
+            if self.ruined or capital <= EPS or eq.iloc[0] <= EPS:
+                # Account is dead (or this fold began dead): flatline at zero
+                # for this fold's timestamps instead of dividing by ~0.
+                self.ruined = True
+                pieces.append(pd.Series(0.0, index=eq.index, name="equity"))
+                capital = 0.0
+                continue
+            normed = eq / eq.iloc[0] * capital
+            pieces.append(normed)
+            capital = float(normed.iloc[-1])
+            if capital <= EPS:
+                self.ruined = True
         return pd.concat(pieces) if pieces else pd.Series(dtype=float, name="equity")
 
     def _compute_oos_metrics(self) -> None:
@@ -204,13 +294,29 @@ class WFResult:
         if len(eq) < 2:
             self.total_return = self.cagr = self.sharpe = self.max_dd = float("nan")
             return
-        self.total_return = M.total_return(eq)
-        self.cagr = M.cagr(eq)
-        self.sharpe = M.sharpe_ratio(eq)
-        self.max_dd, _ = M.max_drawdown(eq)
+        if getattr(self, "ruined", False):
+            # Total loss: report it plainly instead of letting a zero tail
+            # produce division-by-zero or misleading annualized math. Sharpe is
+            # measured on the surviving prefix (the curve before ruin); if the
+            # account died before producing a measurable prefix, 0.0 — the
+            # RUINED banner in summary() carries the real story, a NaN here
+            # would just break tables.
+            self.total_return = -100.0
+            self.cagr = -100.0
+            self.sharpe = _safe_sharpe(eq[eq > 0])
+            self.max_dd = -100.0
+            return
+        self.total_return = M.total_return(eq)     # percent
+        self.cagr = M.cagr(eq)                      # percent
+        self.sharpe = M.sharpe_ratio(eq)            # ratio
+        self.max_dd, _ = M.max_drawdown(eq)         # percent
 
     @property
     def wfe(self) -> float:
+        """Aggregate walk-forward efficiency: annualized OOS return vs mean
+        annualized IS return. Aggregate, NOT a mean of per-fold ratios — that
+        explodes on any fold whose IS return sits near zero. NaN if IS wasn't
+        profitable on average (nothing meaningful to divide by)."""
         is_ann = [
             _annualize(f.is_return, f.oos_start - f.is_start) for f in self.folds
         ]
@@ -222,6 +328,8 @@ class WFResult:
         return (self.cagr / 100.0) / is_base
 
     def param_churn(self) -> dict[str, float]:
+        """Per param, fraction of fold-to-fold transitions where the winning value
+        changed. High churn = optimizer chasing noise = overfit smell."""
         keys = list(self.folds[0].best_params) if self.folds else []
         if len(self.folds) < 2:
             return {k: 0.0 for k in keys}
@@ -244,6 +352,8 @@ class WFResult:
                 "oos_ret%": round(f.oos_return * 100, 2),
                 "oos_sharpe": round(f.oos_sharpe, 2),
                 "oos_trades": f.oos_trades,
+                "oos_liq": f.oos_liquidations,
+                "wu_wiped": f.warmup_wiped,
             }
             row.update(f.best_params)
             rows.append(row)
@@ -264,12 +374,22 @@ class WFResult:
         L = ["Walk-Forward Analysis",
              f"  {'anchored' if c.anchored else 'rolling'}  "
              f"IS={c.is_bars} OOS={c.oos_bars} warmup={c.warmup_bars} bars  "
-             f"folds={len(self.folds)}  target={c.score_name}",
+             f"folds={len(self.folds)}  target={c.score_name}  leverage={c.leverage}x",
              "",
              "Stitched OOS (the honest number):",
              f"  return  {self.total_return:+.1f}%    CAGR  {self.cagr:+.1f}%",
              f"  sharpe  {self.sharpe:.2f}       maxDD  {self.max_dd:.1f}%",
              ""]
+        total_liq = sum(f.oos_liquidations for f in self.folds)
+        wiped = sum(1 for f in self.folds if f.warmup_wiped)
+        if getattr(self, "ruined", False):
+            L.append("*** ACCOUNT RUINED: stitched capital hit zero mid-run — total loss. ***")
+            if wiped:
+                L.append(f"    ({wiped}/{len(self.folds)} folds died during their warmup bars —")
+                L.append(f"    this leverage level does not survive this data's volatility.)")
+        if c.leverage > 1.0:
+            flag = "  <-- leverage is amplifying losses, not revealing edge" if total_liq > 0 else ""
+            L.append(f"Liquidations in OOS: {total_liq}{flag}")
         L.append(f"Walk-Forward Efficiency: {self.wfe:.0%}  ->  {self._verdict(self.wfe)}")
         churn = self.param_churn()
         if churn:
@@ -280,80 +400,60 @@ class WFResult:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# __main__
+# Usage / smoke test.  `python walk_forward.py`
+# Swap the synthetic block for your real OHLCV loader and you're done.
 # ══════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    from strategies.ma_crossover import MACrossover
+    from strategies.ma_crossover_ls import MACrossoverLS
 
-    # ---- REAL LOADER (reuses data/loader.py exactly as run.py does) ----
+    # ---- REAL USAGE looks like this -------------------------------------
+    #   data = load_your_4h_ohlcv()          # UTC-indexed, ascending
+    #   factory = lambda p: MACrossoverLS(**p)
+    #   grid = {"fast_period": [20, 50, 80], "slow_period": [150, 200, 250],
+    #           "stop_pct": [0.06, 0.08, 0.12]}
+    #
+    #   Step 1 — ALWAYS run leverage=1 first. This answers "does long/short
+    #   direction add edge over long-only" before any leverage risk is added:
+    #   res = walk_forward(data, factory, grid,
+    #                      WFConfig(is_bars=1080, oos_bars=180, warmup_bars=250,
+    #                               leverage=1.0))
+    #
+    #   Step 2 — only if step 1 shows real WFE, test leverage with a realistic
+    #   funding rate (leverage without funding overstates every result):
+    #   res_lev = walk_forward(data, factory, grid,
+    #                          WFConfig(is_bars=1080, oos_bars=180, warmup_bars=250,
+    #                                   leverage=3.0, funding_rate_8h=0.0001,
+    #                                   liquidation_penalty_bps=25))
+    #   print(res.summary()); print(res.to_dataframe().to_string(index=False))
+    # ---------------------------------------------------------------------
+
     from data.loader import load_candles
-    data = load_candles("BTCUSDT", "4h", "2022-01-01", "2026-06-25")
-    # ---- END LOADER ----
+    data = load_candles("BTCUSDT", "4h", "2022-01-01", "2026-07-02")
 
-    factory = lambda p: MACrossover(**p)
-    grid = {"fast_period": [20, 30], "slow_period": [200], "stop_pct": [0.08]}
+    factory = lambda p: MACrossoverLS(**p)
+    grid = {"fast_period": [20, 50], "slow_period": [150, 200], "stop_pct": [0.08]}
 
-    # Split before walk_forward so folds never touch holdout
-    HOLDOUT_START = "2026-03-01"
-    holdout_mask = data.index >= pd.Timestamp(HOLDOUT_START, tz="UTC")
-    dev_data     = data[~holdout_mask]
-    holdout_data = data[holdout_mask]
-
-    res = walk_forward(
-        dev_data, factory, grid,
-        WFConfig(is_bars=1080, oos_bars=180, warmup_bars=250),
+    print("=" * 70)
+    print("LEVERAGE = 1x  (isolate whether long/short direction has edge)")
+    print("=" * 70)
+    res1 = walk_forward(
+        data, factory, grid,
+        WFConfig(is_bars=1080, oos_bars=180, warmup_bars=200, leverage=1.0),
     )
-    print(res.summary())
+    print(res1.summary())
     print()
-    print(res.to_dataframe().to_string(index=False))
-
-    # ══════════════════════════════════════════════════════════════════════
-    # TRUE HOLDOUT TEST — one shot, no tuning, never seen by any fold above
-    # ══════════════════════════════════════════════════════════════════════
-    FIXED_PARAMS = {"fast_period": 20, "slow_period": 200, "stop_pct": 0.08}
-    WARMUP = 250
-
-    # Confirm walk_forward() never touched holdout — last fold's oos_end is an
-    # integer index into `data`; translate to timestamp for the check.
-    last_fold_end_ts = data.index[res.folds[-1].oos_end - 1]
-    holdout_first_ts = holdout_data.index[0]
+    print(res1.to_dataframe().to_string(index=False))
 
     print()
-    print("=" * 68)
-    print("TRUE HOLDOUT TEST")
-    print(f"  dev_data   : {dev_data.index[0].date()} -> {dev_data.index[-1].date()}  ({len(dev_data)} bars)")
-    print(f"  holdout    : {holdout_first_ts.date()} -> {holdout_data.index[-1].date()}  ({len(holdout_data)} bars)")
-    print(f"  last fold ended at bar index {res.folds[-1].oos_end - 1} ({last_fold_end_ts.date()})")
-    print(f"  holdout starts at {holdout_first_ts.date()} — {'CLEAN (no overlap)' if last_fold_end_ts < holdout_first_ts else 'OVERLAP — not clean'}")
-    print(f"  fixed params: {FIXED_PARAMS}")
-    print("=" * 68)
-
-    # Prepend warmup bars from dev_data so indicators are warm at holdout[0]
-    warmup_slice = dev_data.iloc[-WARMUP:]
-    run_data     = pd.concat([warmup_slice, holdout_data])
-
-    cfg_holdout = WFConfig(
-        initial_capital=10_000.0, fee_rate=0.001,
-        slippage_bps=0.0, position_fraction=1.0,
+    print("=" * 70)
+    print("LEVERAGE = 3x, funding 0.0001/8h  (only meaningful if 1x showed edge)")
+    print("=" * 70)
+    res3 = walk_forward(
+        data, factory, grid,
+        WFConfig(is_bars=1080, oos_bars=180, warmup_bars=200,
+                 leverage=3.0, funding_rate_8h=0.0001, liquidation_penalty_bps=25),
     )
-    holdout_res = _run(factory(FIXED_PARAMS), run_data, cfg_holdout)
-
-    # Strip the warmup portion from equity and trades before reporting
-    holdout_equity = holdout_res.equity.iloc[WARMUP:]
-    holdout_trades = sum(
-        1 for t in holdout_res.trades
-        if t.exit_bar_idx is not None and t.exit_bar_idx >= WARMUP
-    )
-
-    h_return = M.total_return(holdout_equity)
-    h_cagr   = M.cagr(holdout_equity)
-    h_sharpe = M.sharpe_ratio(holdout_equity)
-    h_dd, _  = M.max_drawdown(holdout_equity)
-
-    print(f"  return     : {h_return:+.2f}%")
-    print(f"  CAGR       : {h_cagr:+.2f}%")
-    print(f"  Sharpe     : {h_sharpe:.2f}")
-    print(f"  max DD     : {h_dd:.2f}%")
-    print(f"  trades     : {holdout_trades}")
-    print("=" * 68)
+    print(res3.summary())
+    print()
+    print(res3.to_dataframe().to_string(index=False))
