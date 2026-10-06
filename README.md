@@ -59,7 +59,7 @@ pip install -e ".[dev]"
 ## Run a backtest
 
 ```powershell
-# Default: BTCUSDT, 3-year range, SMA(50,200) with 8% stop, 10k USDT
+# Default: BTCUSDT, 2022-01-01 to today, SMA(50,200) with 8% stop, 10k USDT
 python run.py
 
 # Custom range and parameters
@@ -343,11 +343,29 @@ python walk_forward.py
 
 Parameters, grid, IS/OOS window sizes, and the holdout split date are all set inside the `__main__` block of `walk_forward.py` at the repo root.
 
-The current `__main__` block runs the long/short `MACrossoverLS` twice: first at
-1x (does going short add any edge over long-only?), then at 3x with funding
-0.0001/8h and a 25 bps liquidation penalty. Read the 3x run only if the 1x run
-shows real WFE. The MACrossover results below come from the earlier long-only
-configuration.
+The current `__main__` block loads 2022-01-01 to 2026-07-02 and runs the
+long/short `MACrossoverLS` twice: first at 1x (does going short add any edge
+over long-only?), then at 3x with funding 0.0001/8h and a 25 bps liquidation
+penalty. Read the 3x run only if the 1x run shows real WFE. The MACrossover
+results below come from the earlier long-only configuration.
+
+### True holdout
+
+Before any walk-forward runs, `split_holdout(data, "2026-03-01")` cuts the data
+in two. Walk-forward only ever sees the dev part. Then `holdout_test()` runs
+**once** on the holdout window, with no tuning:
+
+- **Params**: the last fold's `best_params`, i.e. what the process would have
+  deployed on the split date. Not the params that look best in hindsight.
+- **Warmup**: `warmup_bars` of dev data are prepended so the SMAs are warm on
+  the first holdout bar, then trimmed from equity and trade counts.
+- **Overlap check**: the output prints `CLEAN (no overlap)` only if the last
+  fold ended before the holdout started.
+- **Ruin-safe**: an account wiped out at leverage reports -100%, never `NaN`.
+
+Splitting *after* walk-forward (or passing the full data in) would let folds
+train on the holdout, making it worthless. `tests/test_holdout.py` pins the
+boundary, the warmup trimming and the ruin reporting.
 
 ### Leverage and ruin
 
