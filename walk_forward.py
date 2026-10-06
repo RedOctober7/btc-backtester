@@ -400,6 +400,95 @@ class WFResult:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# True holdout — one shot on data no fold ever saw
+# ══════════════════════════════════════════════════════════════════════════
+
+def split_holdout(data: pd.DataFrame, holdout_start: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split BEFORE walk_forward() so no fold (IS or OOS) can touch the holdout.
+    Splitting after, or passing the full series in, silently contaminates it."""
+    mask = data.index >= pd.Timestamp(holdout_start, tz="UTC")
+    return data[~mask], data[mask]
+
+
+@dataclass
+class HoldoutResult:
+    params: dict
+    start: pd.Timestamp
+    end: pd.Timestamp
+    n_bars: int
+    clean: bool            # True iff the last dev fold ended before the holdout began
+    total_return: float    # percent
+    cagr: float            # percent
+    sharpe: float
+    max_dd: float          # percent (negative)
+    trades: int            # trades that EXITED inside the holdout window
+    liquidations: int
+    equity: pd.Series
+
+    def summary(self) -> str:
+        return "\n".join([
+            "True holdout (never seen by any fold)",
+            f"  window  {self.start.date()} -> {self.end.date()}  ({self.n_bars} bars)  "
+            f"{'CLEAN (no overlap)' if self.clean else 'OVERLAP - NOT CLEAN'}",
+            f"  params  {self.params}",
+            f"  return  {self.total_return:+.1f}%    CAGR  {self.cagr:+.1f}%",
+            f"  sharpe  {self.sharpe:.2f}       maxDD  {self.max_dd:.1f}%",
+            f"  trades  {self.trades}    liquidations  {self.liquidations}",
+        ])
+
+
+def holdout_test(
+    dev_data: pd.DataFrame,
+    holdout_data: pd.DataFrame,
+    strategy_factory: Callable[[dict], Strategy],
+    params: dict,
+    cfg: WFConfig,
+    wf_result: WFResult | None = None,
+) -> HoldoutResult:
+    """Run `params` ONCE on the holdout window. No tuning happens here.
+
+    Pass the params the dev walk-forward would hand you at the split date — the
+    last fold's best_params — not the ones that look best after peeking.
+    cfg.warmup_bars of dev data are prepended so indicators are warm at the
+    holdout's first bar; that warmup is trimmed from equity and trade counts.
+    Ruin-safe like the stitched curve: a dead account reports -100%, not NaN.
+    """
+    if holdout_data.empty:
+        raise ValueError("holdout window is empty")
+    warmup = min(cfg.warmup_bars, len(dev_data))
+    run_data = pd.concat([dev_data.iloc[len(dev_data) - warmup:], holdout_data])
+    r = _run(strategy_factory(params), run_data, cfg)
+
+    eq = r.equity.iloc[warmup:]
+    exited = [t for t in r.trades if t.exit_bar_idx is not None and t.exit_bar_idx >= warmup]
+    ret = _return_frac(eq)
+    if len(eq) and float(eq.iloc[0]) <= 0.0:
+        ret = -1.0  # wiped during warmup: the holdout began with a dead account
+
+    clean = True
+    if wf_result is not None and wf_result.folds:
+        last_oos_ts = dev_data.index[wf_result.folds[-1].oos_end - 1]
+        clean = last_oos_ts < holdout_data.index[0]
+
+    peak = eq.cummax()
+    dd = float(((eq / peak.where(peak > 0)) - 1.0).min() * 100) if len(eq) else 0.0
+    return HoldoutResult(
+        params=dict(params),
+        start=holdout_data.index[0],
+        end=holdout_data.index[-1],
+        n_bars=len(holdout_data),
+        clean=clean,
+        total_return=ret * 100,
+        cagr=_annualize(ret, len(eq)) * 100,
+        sharpe=_safe_sharpe(eq),
+        max_dd=-100.0 if ret <= -1.0 else (0.0 if np.isnan(dd) else dd),
+        trades=len(exited),
+        liquidations=sum(1 for t in exited if t.exit_reason == "liquidation"),
+        equity=eq,
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # Usage / smoke test.  `python walk_forward.py`
 # Swap the synthetic block for your real OHLCV loader and you're done.
 # ══════════════════════════════════════════════════════════════════════════
@@ -431,29 +520,31 @@ if __name__ == "__main__":
     from data.loader import load_candles
     data = load_candles("BTCUSDT", "4h", "2022-01-01", "2026-07-02")
 
+    # Split BEFORE walk_forward so no fold ever touches the holdout window.
+    HOLDOUT_START = "2026-03-01"
+    dev_data, holdout_data = split_holdout(data, HOLDOUT_START)
+
     factory = lambda p: MACrossoverLS(**p)
     grid = {"fast_period": [20, 50], "slow_period": [150, 200], "stop_pct": [0.08]}
 
-    print("=" * 70)
-    print("LEVERAGE = 1x  (isolate whether long/short direction has edge)")
-    print("=" * 70)
-    res1 = walk_forward(
-        data, factory, grid,
-        WFConfig(is_bars=1080, oos_bars=180, warmup_bars=200, leverage=1.0),
-    )
-    print(res1.summary())
-    print()
-    print(res1.to_dataframe().to_string(index=False))
-
-    print()
-    print("=" * 70)
-    print("LEVERAGE = 3x, funding 0.0001/8h  (only meaningful if 1x showed edge)")
-    print("=" * 70)
-    res3 = walk_forward(
-        data, factory, grid,
-        WFConfig(is_bars=1080, oos_bars=180, warmup_bars=200,
-                 leverage=3.0, funding_rate_8h=0.0001, liquidation_penalty_bps=25),
-    )
-    print(res3.summary())
-    print()
-    print(res3.to_dataframe().to_string(index=False))
+    runs = [
+        ("LEVERAGE = 1x  (isolate whether long/short direction has edge)",
+         WFConfig(is_bars=1080, oos_bars=180, warmup_bars=200, leverage=1.0)),
+        ("LEVERAGE = 3x, funding 0.0001/8h  (only meaningful if 1x showed edge)",
+         WFConfig(is_bars=1080, oos_bars=180, warmup_bars=200,
+                  leverage=3.0, funding_rate_8h=0.0001, liquidation_penalty_bps=25)),
+    ]
+    for title, cfg in runs:
+        print("=" * 70)
+        print(title)
+        print("=" * 70)
+        res = walk_forward(dev_data, factory, grid, cfg)
+        print(res.summary())
+        print()
+        print(res.to_dataframe().to_string(index=False))
+        print()
+        # The params the process would actually deploy at the split date.
+        hold = holdout_test(dev_data, holdout_data, factory,
+                            res.folds[-1].best_params, cfg, wf_result=res)
+        print(hold.summary())
+        print()
