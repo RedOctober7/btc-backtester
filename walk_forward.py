@@ -121,10 +121,11 @@ class Fold:
     oos_liquidations: int  # count of OOS trades that ended in forced liquidation
     warmup_wiped: bool     # True if the account was liquidated to zero DURING the
                            # warmup bars, before the OOS window began. The fold is
-                           # then UNMEASURABLE — an artifact of trading through
-                           # warmup, not a real OOS outcome — and is excluded from
-                           # stitching. Any nonzero count is a red flag that this
-                           # leverage level dies on this data's volatility.
+                           # then begins dead: stitching treats it as RUIN (curve
+                           # flatlines at zero from here on) rather than skipping
+                           # it, which would flatter the result by omission. Any
+                           # nonzero count is a red flag that this leverage level
+                           # dies on this data's volatility.
     oos_equity: pd.Series  # trimmed to the true OOS region
 
 
