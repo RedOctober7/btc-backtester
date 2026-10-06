@@ -65,6 +65,9 @@ python run.py
 # Custom range and parameters
 python run.py --start 2021-01-01 --end 2024-01-01 --fast 20 --slow 100 --stop 0.05
 
+# Other symbol, capital, and position size (fraction of equity per trade)
+python run.py --symbol ETHUSDT --capital 5000 --fraction 0.5
+
 # Skip chart generation
 python run.py --no-plot
 
@@ -377,11 +380,13 @@ boundary, the warmup trimming and the ruin reporting.
   curve flatlines at zero. A trader who blew up does not get a fresh bankroll
   next fold.
 - **Warmup wipeouts**: a fold liquidated during its warmup bars (before OOS
-  starts) is flagged `warmup_wiped` and left out of stitching. Any nonzero count
+  starts) is flagged `warmup_wiped` and counts as ruin. It is *not* skipped:
+  stitching only the surviving folds would hide the blow-up. Any nonzero count
   means this leverage level doesn't survive the data's volatility.
-- The summary reports OOS liquidations per fold and warns when leverage is
-  amplifying losses instead of revealing edge. Metrics never print `NaN`: a
-  wiped account shows -100%.
+- The summary prints total OOS liquidations and warns when leverage is
+  amplifying losses instead of revealing edge. The per-fold table has
+  `oos_liq` and `wu_wiped` columns. Metrics never print `NaN`: a wiped
+  account shows -100%.
 
 `tests/test_walk_forward_stress.py` covers mid-fold wipeouts, liquidation
 inside warmup, wiped capital carrying into later folds, and NaN-safety of every
