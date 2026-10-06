@@ -23,3 +23,8 @@ backtest_89d.png
 backtest_91d.png
 debug_fill.png
 week_test.png
+
+# Paper-trading runtime state (generated on the machine that runs it)
+paper_state.json
+paper_log.csv
+paper_state.json.tmp

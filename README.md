@@ -19,6 +19,24 @@ A signal generated at bar `t`'s close is *queued* as a pending order and execute
 at the very next bar's opening price. This reflects reality: you can't trade on a
 candle until it's closed. This is the "next-bar open" fill rule.
 
+## Project layout
+
+| Path | What it does |
+|---|---|
+| `data/loader.py` | Downloads Binance klines and caches them in `cache/` |
+| `engine/engine.py` | Bar-by-bar loop, next-bar-open fills, `run_backtest()` |
+| `engine/context.py` | The windowed `Context` a strategy sees (rows `0..t` only) |
+| `engine/broker.py` | Fills, fees, slippage, long/short, leverage, liquidation, funding, trade blotter |
+| `strategies/ma_crossover.py` | `MACrossover`: long/flat SMA crossover with a drawdown stop |
+| `strategies/ma_crossover_ls.py` | `MACrossoverLS`: long/short SMA crossover with a symmetric drawdown stop |
+| `metrics/metrics.py` | Return, CAGR, Sharpe, drawdown, win rate, profit factor, exposure |
+| `reporting/plot.py` | TradingView-style 3-panel dark chart |
+| `analysis/levels.py` | Swing points, Fibonacci, trendlines (chart overlay only) |
+| `run.py` | CLI: single backtest + chart |
+| `walk_forward.py` | Walk-forward optimization, holdout, leverage/ruin handling |
+| `paper_trade.py` | Forward paper-trading loop on live Binance candles |
+| `tests/` | pytest suite, including adversarial leverage and walk-forward stress tests |
+
 ## Setup (Windows PowerShell 5.1)
 
 Commands must be run **one per line** — PowerShell 5.1 does not support `&&` chaining.
@@ -91,6 +109,61 @@ class MyStrategy(Strategy):
 ```
 
 Then pass it to `run_backtest()`.
+
+The `Context` order methods are `context.buy()` (open a long),
+`context.sell_short()` (open a short) and `context.close_position(reason=...)`.
+`context.position.is_long` / `is_short` tell you which side you hold.
+
+## Short selling and leverage (broker v2)
+
+The broker supports one long **or** short position at a time, with optional
+leverage, modeled as a linear perpetual-futures approximation. All new
+parameters default to spot behavior: at `leverage=1` with funding off, every
+number is bit-for-bit identical to the original long-only engine, so the
+results below do not move unless you opt in.
+
+```python
+from engine.engine import run_backtest
+from strategies.ma_crossover_ls import MACrossoverLS
+
+result = run_backtest(
+    MACrossoverLS(fast_period=20, slow_period=200, stop_pct=0.08),
+    data,
+    leverage=3.0,                    # >= 1.0
+    funding_rate_8h=0.0001,          # charged on 8h-aligned bars; longs pay, shorts receive
+    maintenance_margin_rate=0.005,
+    liquidation_penalty_bps=25,      # extra slippage on a forced fill
+)
+```
+
+Leverage and shorting are available from code only. `run.py` still runs the
+long-only `MACrossover` at 1x.
+
+How the broker resolves the hard cases (when OHLC data can't answer a question,
+it picks the **pessimistic** answer so a leveraged backtest is never flattered):
+
+- **Sizing**: margin = `cash * position_fraction`, notional = margin × leverage,
+  fee-inclusive size.
+- **Liquidation price**: from "position equity == maintenance margin on
+  *current* notional", the way linear-perp venues compute isolated liquidation.
+- **Gap-aware liquidation fill**: if a bar *opens* beyond the liquidation price,
+  the fill is the open (you eat the gap), not the trigger price.
+- **Loss floor**: loss is capped at the posted margin, so equity never goes
+  negative. Insurance fund / ADL are not modeled.
+- **Funding**: deducted from locked margin, so it both erodes PnL and pulls the
+  liquidation price closer. Leave it at 0 and every leveraged hold is overstated;
+  ~0.0001 per 8h is a typical resting rate.
+- Liquidated trades are tagged `exit_reason="liquidation"`.
+
+`MACrossoverLS` goes long when the fast SMA crosses above the slow one and short
+when it crosses below. On a flip it closes first (reason `flip`) and opens the
+other side the next bar. The drawdown stop is symmetric: peak-close for longs,
+trough-close for shorts.
+
+`tests/test_leverage_stress.py` builds bars by hand for the cases random data
+never hits: crash gaps through the liquidation level, wicks that touch it and
+recover, liquidation on the entry bar, stop-vs-liquidation collisions, and
+funding erosion.
 
 ## Technical-analysis overlay (visualization only)
 
@@ -255,8 +328,8 @@ The only variable across these three runs is the market regime — parameters, f
 logic are identical. A profit factor range of 0.42 to 3.11 on the same rules illustrates
 the core lesson of trend-following: regime awareness matters more than parameter tuning,
 because no parameter set makes a crossover strategy profitable in a directionless market.
-This is precisely why walk-forward testing and regime detection exist — and why they are
-correctly out of scope for this v1.
+This is precisely why walk-forward testing (see [Walk-Forward Analysis](#walk-forward-analysis))
+and regime detection exist. Regime detection is still out of scope.
 
 ## Walk-Forward Analysis
 
@@ -269,6 +342,32 @@ python walk_forward.py
 ```
 
 Parameters, grid, IS/OOS window sizes, and the holdout split date are all set inside the `__main__` block of `walk_forward.py` at the repo root.
+
+The current `__main__` block runs the long/short `MACrossoverLS` twice: first at
+1x (does going short add any edge over long-only?), then at 3x with funding
+0.0001/8h and a 25 bps liquidation penalty. Read the 3x run only if the 1x run
+shows real WFE. The MACrossover results below come from the earlier long-only
+configuration.
+
+### Leverage and ruin
+
+`WFConfig` passes `leverage`, `funding_rate_8h`, `maintenance_margin_rate` and
+`liquidation_penalty_bps` straight to the broker. Start every new strategy at
+`leverage=1.0`; adding leverage to an unproven signal only amplifies noise.
+
+- **Ruin is permanent**: if the stitched capital hits zero, the rest of the
+  curve flatlines at zero. A trader who blew up does not get a fresh bankroll
+  next fold.
+- **Warmup wipeouts**: a fold liquidated during its warmup bars (before OOS
+  starts) is flagged `warmup_wiped` and left out of stitching. Any nonzero count
+  means this leverage level doesn't survive the data's volatility.
+- The summary reports OOS liquidations per fold and warns when leverage is
+  amplifying losses instead of revealing edge. Metrics never print `NaN`: a
+  wiped account shows -100%.
+
+`tests/test_walk_forward_stress.py` covers mid-fold wipeouts, liquidation
+inside warmup, wiped capital carrying into later folds, and NaN-safety of every
+headline number.
 
 ### How to read WFE
 
@@ -307,6 +406,44 @@ The holdout result is negative. This does not validate or invalidate the strateg
 
 **These numbers are a development-period diagnostic, not a live-trading signal.** WFE of 53% indicates the IS optimizer is partially overfitting; the negative holdout coincides with an unfavorable regime; and no position-sizing, risk management, or regime filter has been applied. Do not interpret any result in this section as evidence the strategy is ready for live trading.
 
+## Paper trading
+
+`paper_trade.py` checks whether the walk-forward edge survives on live, unseen
+data. It trades the walk-forward winner, long-only
+`MACrossover(fast_period=20, slow_period=200, stop_pct=0.08)`, with 10k USDT
+paper capital and a 0.1% fee, on BTCUSDT 4h candles from Binance's public API.
+No API key is needed and no real orders are placed.
+
+```powershell
+python paper_trade.py
+```
+
+Each run does one cycle and exits: fetch the last ~300 candles, decide, log,
+save state. Schedule it every 4 hours with Windows Task Scheduler.
+
+| File | Contents |
+|---|---|
+| `paper_state.json` | Position and pending-order state (the source of truth) |
+| `paper_log.csv` | One row per cycle: `run_at_utc, candle_close_utc, close_price, position, action, fill_price, size, cash, equity, note` |
+
+Both are created next to the script and are git-ignored.
+
+Design rules:
+
+- **Closed candles only**: the still-forming candle is dropped, so results are reproducible.
+- **Same fills as the backtest**: a signal on a closed candle is stored as
+  pending and filled at the open of the first candle after it, on the next cycle.
+  If several candles arrived while the PC was off, it still uses the first one.
+- **Restart-proof**: state is written atomically (temp file + `os.replace`).
+- **Self-healing**: indicators are recomputed from fresh history every cycle,
+  so a missed cycle needs no repair.
+- **No silent death**: any exception becomes an `ERROR` row in the CSV, and
+  the script exits 0 so Task Scheduler keeps running it.
+
+Don't change parameters mid-experiment: every change resets the experiment
+clock to zero. Expect occasional one-bar differences from the backtest on
+crossover boundaries because of floating-point noise in the SMAs.
+
 ## Correctness guarantees
 
 1. **No lookahead**: `Context._data = data.iloc[:t+1]` -- future rows are absent, not just hidden.
@@ -317,13 +454,17 @@ The holdout result is negative. This does not validate or invalidate the strateg
 6. **Force-close**: final bar position is closed at that bar's close, tagged `end_of_data`.
 7. **Mark-to-market**: equity is recorded at every bar's close, not just at trade exits.
 
-## V1 limitations (known, intentional)
+## Known limitations (intentional)
 
-- Long-or-flat only. No shorting, leverage, or margin.
-- Single asset. No portfolio.
+- One position at a time (long or short). Single asset, no portfolio.
+- Leverage is a linear-perp approximation: isolated margin, constant funding
+  rate, no insurance fund / ADL (losses floor at posted margin).
+- Shorting and leverage are code-only. `run.py` has no flags for them.
 - No parameter optimization beyond the walk-forward grid search in `walk_forward.py`.
 - No intrabar stop (stop evaluates at close, exits at next open -- see `ma_crossover.py`).
-- No web UI, no live trading.
+  Liquidation is the exception: it's checked intrabar against high/low.
+- No regime filter.
+- No web UI. Paper trading only, no live order execution.
 
 ### Strategy regime-dependence
 
